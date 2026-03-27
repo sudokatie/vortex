@@ -1,7 +1,11 @@
-//! Rigid body dynamics.
+// Rigid body dynamics module
 
-mod body;
-mod material;
+pub mod body;
+pub mod forces;
+pub mod integrator;
+pub mod material;
 
-pub use body::{BodyType, RigidBody};
+pub use body::{RigidBody, BodyType};
+pub use forces::{ForceGenerator, ForceOutput, ForceRegistry, Gravity, Spring, Drag, PointForce, Buoyancy};
+pub use integrator::{IntegratorType, IntegrationState, IntegrationInput, integrate_velocity, integrate_position, integrate_state};
 pub use material::Material;

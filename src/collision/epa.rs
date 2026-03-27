@@ -177,7 +177,7 @@ pub fn epa(
     const TOLERANCE: f32 = 1e-4;
 
     for _ in 0..MAX_ITERATIONS {
-        let (face_idx, dist, normal) = polytope.closest_face();
+        let (_face_idx, dist, normal) = polytope.closest_face();
 
         // Get new support point in direction of closest face normal
         let new_point = support(shape_a, transform_a, shape_b, transform_b, normal);

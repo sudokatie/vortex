@@ -1,31 +1,19 @@
-//! Vortex - Physics engine with rigid body dynamics and collision detection.
-//!
-//! # Features
-//!
-//! - Rigid body simulation with forces, torques, and constraints
-//! - GJK/EPA collision detection for convex shapes
-//! - Sequential impulse constraint solver
-//! - Distance, ball, and hinge joints
-//! - Island-based sleeping
+//! Vortex - A physics engine with rigid body dynamics and collision detection
 //!
 //! # Example
-//!
 //! ```
 //! use vortex::prelude::*;
 //!
 //! let mut world = PhysicsWorld::new();
 //! world.set_gravity(Vec3::new(0.0, -9.81, 0.0));
 //!
-//! // Add a dynamic box
+//! // Add a dynamic body
 //! let body = RigidBody::new(
-//!     CollisionShape::cube(Vec3::splat(0.5)),
+//!     CollisionShape::sphere(0.5),
 //!     1.0,
-//!     BodyType::Dynamic,
+//!     BodyType::Dynamic
 //! );
-//! let handle = world.add_body(body);
-//!
-//! // Simulate
-//! world.step(1.0 / 60.0);
+//! world.add_body(body);
 //! ```
 
 pub mod collision;
@@ -34,16 +22,23 @@ pub mod dynamics;
 pub mod math;
 pub mod world;
 
+/// Prelude - commonly used types
 pub mod prelude {
-    //! Common imports for working with Vortex.
-
-    pub use crate::collision::{Aabb, CollisionShape, ContactManifold};
-    pub use crate::constraints::{BallJoint, DistanceJoint, HingeJoint, Joint};
-    pub use crate::dynamics::{BodyType, Material, RigidBody};
+    pub use glam::{Vec3, Mat3, Quat};
+    pub use crate::collision::{
+        Aabb, BroadPhase, CollisionShape, ContactManifold, ContactPoint,
+        SpatialHash, SweepAndPrune,
+    };
+    pub use crate::constraints::{
+        BallJoint, ConstraintSolver, ContactConstraint, DistanceJoint,
+        HingeJoint, Joint, JointLimit, JointMotor, SolverConfig,
+    };
+    pub use crate::dynamics::{
+        BodyType, Buoyancy, Drag, ForceGenerator, ForceRegistry, Gravity,
+        IntegratorType, Material, PointForce, RigidBody, Spring,
+    };
     pub use crate::math::Transform;
-    pub use crate::world::{BodyHandle, PhysicsWorld};
-
-    pub use glam::{Mat3, Quat, Vec2, Vec3};
+    pub use crate::world::{
+        Island, IslandDetector, PhysicsStep, PhysicsWorld, StepConfig, StepResult,
+    };
 }
-
-pub use world::PhysicsWorld;

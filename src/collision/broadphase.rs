@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use crate::world::BodyHandle;
+use crate::world::world::BodyHandle;
 use super::Aabb;
 
 /// Trait for broad-phase collision detection algorithms.

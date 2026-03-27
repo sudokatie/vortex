@@ -254,7 +254,7 @@ pub fn gjk_intersection(
             // Direction collapsed - likely at origin
             return Some(simplex);
         }
-        direction = direction / len_sq.sqrt();
+        direction /= len_sq.sqrt();
     }
 
     // If we haven't found a result after max iterations, assume intersection
