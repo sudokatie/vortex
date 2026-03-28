@@ -31,6 +31,10 @@ path = "examples/falling_boxes.rs"
 name = "pendulum"
 path = "examples/pendulum.rs"
 
+[[example]]
+name = "ragdoll"
+path = "examples/ragdoll.rs"
+
 # Benchmarks will be added later
 # [[bench]]
 # name = "collision"

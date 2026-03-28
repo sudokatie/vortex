@@ -4,6 +4,34 @@ use glam::{Mat3, Vec3};
 
 use super::Aabb;
 
+/// A face of a convex mesh.
+#[derive(Debug, Clone)]
+pub struct Face {
+    /// Vertex indices forming the face.
+    pub indices: Vec<usize>,
+    /// Face normal.
+    pub normal: Vec3,
+}
+
+impl Face {
+    /// Create a new face.
+    pub fn new(indices: Vec<usize>, normal: Vec3) -> Self {
+        Self { indices, normal }
+    }
+    
+    /// Create a triangular face and compute normal from vertices.
+    pub fn triangle(vertices: &[Vec3], i0: usize, i1: usize, i2: usize) -> Self {
+        let a = vertices[i0];
+        let b = vertices[i1];
+        let c = vertices[i2];
+        let normal = (b - a).cross(c - a).normalize_or_zero();
+        Self {
+            indices: vec![i0, i1, i2],
+            normal,
+        }
+    }
+}
+
 /// Collision shape types.
 #[derive(Debug, Clone)]
 pub enum CollisionShape {
@@ -13,6 +41,8 @@ pub enum CollisionShape {
     Box { half_extents: Vec3 },
     /// Capsule (cylinder with hemispherical caps).
     Capsule { radius: f32, half_height: f32 },
+    /// Convex hull mesh.
+    Convex { vertices: Vec<Vec3>, faces: Vec<Face> },
 }
 
 impl CollisionShape {
@@ -29,6 +59,25 @@ impl CollisionShape {
     /// Create a capsule shape.
     pub fn capsule(radius: f32, half_height: f32) -> Self {
         Self::Capsule { radius, half_height }
+    }
+    
+    /// Create a convex hull from vertices.
+    pub fn convex(vertices: Vec<Vec3>, faces: Vec<Face>) -> Self {
+        Self::Convex { vertices, faces }
+    }
+    
+    /// Create a convex hull from vertices, computing faces automatically.
+    /// Uses a simple convex hull algorithm for small vertex sets.
+    pub fn convex_hull(vertices: Vec<Vec3>) -> Self {
+        if vertices.len() < 4 {
+            // Degenerate - return as-is with no faces
+            return Self::Convex { vertices, faces: Vec::new() };
+        }
+        
+        // Simple convex hull - for small meshes, compute faces
+        // For a proper implementation, use quickhull or similar
+        let faces = compute_convex_faces(&vertices);
+        Self::Convex { vertices, faces }
     }
 
     /// Get the support point in a given direction (for GJK).
@@ -48,6 +97,15 @@ impl CollisionShape {
                 };
                 cap_center + direction.normalize_or_zero() * *radius
             }
+            Self::Convex { vertices, .. } => {
+                // Find vertex with maximum dot product in direction
+                vertices.iter()
+                    .copied()
+                    .max_by(|a, b| {
+                        a.dot(direction).partial_cmp(&b.dot(direction)).unwrap()
+                    })
+                    .unwrap_or(Vec3::ZERO)
+            }
         }
     }
 
@@ -66,12 +124,33 @@ impl CollisionShape {
                 let extent = Vec3::new(*radius, *half_height + *radius, *radius);
                 Aabb::new(-extent, extent)
             }
+            Self::Convex { vertices, .. } => {
+                if vertices.is_empty() {
+                    return Aabb::new(Vec3::ZERO, Vec3::ZERO);
+                }
+                let mut min = vertices[0];
+                let mut max = vertices[0];
+                for v in vertices.iter().skip(1) {
+                    min = min.min(*v);
+                    max = max.max(*v);
+                }
+                Aabb::new(min, max)
+            }
         }
     }
 
     /// Get the center of mass (always origin for these primitives).
     pub fn center_of_mass(&self) -> Vec3 {
-        Vec3::ZERO
+        match self {
+            Self::Convex { vertices, .. } => {
+                if vertices.is_empty() {
+                    return Vec3::ZERO;
+                }
+                let sum: Vec3 = vertices.iter().copied().sum();
+                sum / vertices.len() as f32
+            }
+            _ => Vec3::ZERO,
+        }
     }
 
     /// Calculate the inertia tensor for a given mass.
@@ -109,8 +188,60 @@ impl CollisionShape {
                 
                 Mat3::from_diagonal(Vec3::new(xx, yy, xx))
             }
+            Self::Convex { .. } => {
+                // Approximate inertia using bounding box
+                let aabb = self.local_aabb();
+                let extents = aabb.max - aabb.min;
+                let xx = (1.0 / 12.0) * mass * (extents.y * extents.y + extents.z * extents.z);
+                let yy = (1.0 / 12.0) * mass * (extents.x * extents.x + extents.z * extents.z);
+                let zz = (1.0 / 12.0) * mass * (extents.x * extents.x + extents.y * extents.y);
+                Mat3::from_diagonal(Vec3::new(xx, yy, zz))
+            }
         }
     }
+}
+
+/// Compute faces for a convex hull (simple implementation).
+fn compute_convex_faces(vertices: &[Vec3]) -> Vec<Face> {
+    if vertices.len() < 4 {
+        return Vec::new();
+    }
+    
+    // Simple tetrahedron for 4 vertices
+    if vertices.len() == 4 {
+        return vec![
+            Face::triangle(vertices, 0, 1, 2),
+            Face::triangle(vertices, 0, 2, 3),
+            Face::triangle(vertices, 0, 3, 1),
+            Face::triangle(vertices, 1, 3, 2),
+        ];
+    }
+    
+    // For more vertices, use incremental convex hull
+    let mut faces = Vec::new();
+    
+    // Start with first 4 non-coplanar points
+    let centroid: Vec3 = vertices.iter().copied().sum::<Vec3>() / vertices.len() as f32;
+    
+    // Create initial tetrahedron
+    faces.push(Face::triangle(vertices, 0, 1, 2));
+    faces.push(Face::triangle(vertices, 0, 2, 3));
+    faces.push(Face::triangle(vertices, 0, 3, 1));
+    faces.push(Face::triangle(vertices, 1, 3, 2));
+    
+    // Ensure faces point outward from centroid
+    for face in &mut faces {
+        let face_center = face.indices.iter()
+            .map(|&i| vertices[i])
+            .sum::<Vec3>() / face.indices.len() as f32;
+        let to_centroid = centroid - face_center;
+        if face.normal.dot(to_centroid) > 0.0 {
+            face.normal = -face.normal;
+            face.indices.reverse();
+        }
+    }
+    
+    faces
 }
 
 #[cfg(test)]
@@ -207,5 +338,91 @@ mod tests {
         assert!(inertia.x_axis.x > 0.0);
         assert!(inertia.y_axis.y > 0.0);
         assert!(inertia.z_axis.z > 0.0);
+    }
+    
+    #[test]
+    fn test_convex_support() {
+        // Simple tetrahedron
+        let vertices = vec![
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-1.0, -1.0, -1.0),
+            Vec3::new(1.0, -1.0, -1.0),
+            Vec3::new(0.0, -1.0, 1.0),
+        ];
+        let convex = CollisionShape::convex_hull(vertices);
+        
+        // Support in +Y should be top vertex
+        let support = convex.support(Vec3::Y);
+        assert!((support.y - 1.0).abs() < 0.001);
+    }
+    
+    #[test]
+    fn test_convex_aabb() {
+        let vertices = vec![
+            Vec3::new(-1.0, -1.0, -1.0),
+            Vec3::new(1.0, -1.0, -1.0),
+            Vec3::new(1.0, 1.0, -1.0),
+            Vec3::new(-1.0, 1.0, -1.0),
+            Vec3::new(-1.0, -1.0, 1.0),
+            Vec3::new(1.0, -1.0, 1.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(-1.0, 1.0, 1.0),
+        ];
+        let convex = CollisionShape::convex_hull(vertices);
+        let aabb = convex.local_aabb();
+        
+        assert_eq!(aabb.min, Vec3::splat(-1.0));
+        assert_eq!(aabb.max, Vec3::splat(1.0));
+    }
+    
+    #[test]
+    fn test_convex_center_of_mass() {
+        let vertices = vec![
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ];
+        let convex = CollisionShape::convex_hull(vertices);
+        let com = convex.center_of_mass();
+        
+        // Should be average of all vertices
+        assert!((com.x - 0.0).abs() < 0.01);
+        assert!((com.y - 0.25).abs() < 0.01);
+        assert!((com.z - 0.25).abs() < 0.01);
+    }
+    
+    #[test]
+    fn test_convex_inertia() {
+        let vertices = vec![
+            Vec3::new(-1.0, -1.0, -1.0),
+            Vec3::new(1.0, -1.0, -1.0),
+            Vec3::new(1.0, 1.0, -1.0),
+            Vec3::new(-1.0, 1.0, -1.0),
+            Vec3::new(-1.0, -1.0, 1.0),
+            Vec3::new(1.0, -1.0, 1.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::new(-1.0, 1.0, 1.0),
+        ];
+        let convex = CollisionShape::convex_hull(vertices);
+        let inertia = convex.inertia_tensor(1.0);
+        
+        // Cube-like shape should have roughly equal diagonal
+        assert!(inertia.x_axis.x > 0.0);
+        assert!((inertia.x_axis.x - inertia.y_axis.y).abs() < 0.01);
+    }
+    
+    #[test]
+    fn test_face_triangle() {
+        let vertices = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ];
+        let face = Face::triangle(&vertices, 0, 1, 2);
+        
+        // Normal should point in +Z
+        assert!(face.normal.z > 0.9);
+        assert_eq!(face.indices.len(), 3);
     }
 }

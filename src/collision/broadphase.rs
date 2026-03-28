@@ -130,6 +130,205 @@ impl BroadPhase for SweepAndPrune {
     }
 }
 
+/// Bounding Volume Hierarchy node.
+#[derive(Debug, Clone)]
+struct BvhNode {
+    aabb: Aabb,
+    /// Left child index (if internal) or first body index (if leaf)
+    left: usize,
+    /// Right child index (if internal) or body count (if leaf)
+    right: usize,
+    /// True if this is a leaf node
+    is_leaf: bool,
+}
+
+/// Bounding Volume Hierarchy for static geometry.
+#[derive(Debug)]
+pub struct Bvh {
+    nodes: Vec<BvhNode>,
+    bodies: Vec<(BodyHandle, Aabb)>,
+    root: Option<usize>,
+}
+
+impl Bvh {
+    /// Create a new empty BVH.
+    pub fn new() -> Self {
+        Self {
+            nodes: Vec::new(),
+            bodies: Vec::new(),
+            root: None,
+        }
+    }
+    
+    /// Build the BVH from current bodies.
+    fn build(&mut self) {
+        if self.bodies.is_empty() {
+            self.root = None;
+            return;
+        }
+        
+        self.nodes.clear();
+        self.root = Some(self.build_recursive(0, self.bodies.len()));
+    }
+    
+    fn build_recursive(&mut self, start: usize, end: usize) -> usize {
+        let count = end - start;
+        
+        // Compute bounding box for this node
+        let mut aabb = self.bodies[start].1;
+        for i in (start + 1)..end {
+            aabb = aabb.merged(&self.bodies[i].1);
+        }
+        
+        // Leaf node if few bodies
+        if count <= 2 {
+            let node_idx = self.nodes.len();
+            self.nodes.push(BvhNode {
+                aabb,
+                left: start,
+                right: count,
+                is_leaf: true,
+            });
+            return node_idx;
+        }
+        
+        // Find split axis (longest)
+        let extent = aabb.max - aabb.min;
+        let axis = if extent.x > extent.y && extent.x > extent.z {
+            0
+        } else if extent.y > extent.z {
+            1
+        } else {
+            2
+        };
+        
+        // Sort bodies along axis
+        let mid = (start + end) / 2;
+        self.bodies[start..end].select_nth_unstable_by(mid - start, |a, b| {
+            let ca = (a.1.min + a.1.max) * 0.5;
+            let cb = (b.1.min + b.1.max) * 0.5;
+            let va = match axis { 0 => ca.x, 1 => ca.y, _ => ca.z };
+            let vb = match axis { 0 => cb.x, 1 => cb.y, _ => cb.z };
+            va.partial_cmp(&vb).unwrap()
+        });
+        
+        // Reserve space for this node
+        let node_idx = self.nodes.len();
+        self.nodes.push(BvhNode {
+            aabb,
+            left: 0,
+            right: 0,
+            is_leaf: false,
+        });
+        
+        // Build children
+        let left = self.build_recursive(start, mid);
+        let right = self.build_recursive(mid, end);
+        
+        self.nodes[node_idx].left = left;
+        self.nodes[node_idx].right = right;
+        
+        node_idx
+    }
+    
+    /// Query pairs that potentially collide.
+    fn query_pairs_recursive(&self, node_idx: usize, pairs: &mut Vec<(BodyHandle, BodyHandle)>) {
+        let node = &self.nodes[node_idx];
+        
+        if node.is_leaf {
+            // Check all pairs within leaf
+            let start = node.left;
+            let count = node.right;
+            for i in 0..count {
+                for j in (i + 1)..count {
+                    let a = &self.bodies[start + i];
+                    let b = &self.bodies[start + j];
+                    if a.1.intersects(&b.1) {
+                        pairs.push((a.0, b.0));
+                    }
+                }
+            }
+        } else {
+            // Check children against each other
+            self.query_pairs_recursive(node.left, pairs);
+            self.query_pairs_recursive(node.right, pairs);
+            self.query_cross(node.left, node.right, pairs);
+        }
+    }
+    
+    fn query_cross(&self, left_idx: usize, right_idx: usize, pairs: &mut Vec<(BodyHandle, BodyHandle)>) {
+        let left = &self.nodes[left_idx];
+        let right = &self.nodes[right_idx];
+        
+        if !left.aabb.intersects(&right.aabb) {
+            return;
+        }
+        
+        if left.is_leaf && right.is_leaf {
+            // Both leaves - check all pairs
+            for i in 0..left.right {
+                for j in 0..right.right {
+                    let a = &self.bodies[left.left + i];
+                    let b = &self.bodies[right.left + j];
+                    if a.1.intersects(&b.1) {
+                        pairs.push((a.0, b.0));
+                    }
+                }
+            }
+        } else if left.is_leaf {
+            self.query_cross(left_idx, right.left, pairs);
+            self.query_cross(left_idx, right.right, pairs);
+        } else if right.is_leaf {
+            self.query_cross(left.left, right_idx, pairs);
+            self.query_cross(left.right, right_idx, pairs);
+        } else {
+            self.query_cross(left.left, right.left, pairs);
+            self.query_cross(left.left, right.right, pairs);
+            self.query_cross(left.right, right.left, pairs);
+            self.query_cross(left.right, right.right, pairs);
+        }
+    }
+}
+
+impl Default for Bvh {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BroadPhase for Bvh {
+    fn insert(&mut self, handle: BodyHandle, aabb: Aabb) {
+        self.bodies.push((handle, aabb));
+        self.build();
+    }
+    
+    fn remove(&mut self, handle: BodyHandle) {
+        self.bodies.retain(|(h, _)| *h != handle);
+        self.build();
+    }
+    
+    fn update(&mut self, handle: BodyHandle, aabb: Aabb) {
+        if let Some(entry) = self.bodies.iter_mut().find(|(h, _)| *h == handle) {
+            entry.1 = aabb;
+        }
+        self.build();
+    }
+    
+    fn query_pairs(&self) -> Vec<(BodyHandle, BodyHandle)> {
+        let mut pairs = Vec::new();
+        if let Some(root) = self.root {
+            self.query_pairs_recursive(root, &mut pairs);
+        }
+        pairs
+    }
+    
+    fn clear(&mut self) {
+        self.nodes.clear();
+        self.bodies.clear();
+        self.root = None;
+    }
+}
+
 /// Spatial hash grid for uniform distributions.
 #[derive(Debug)]
 pub struct SpatialHash {
@@ -322,5 +521,80 @@ mod tests {
 
         let pairs = hash.query_pairs();
         assert_eq!(pairs.len(), 1);
+    }
+    
+    #[test]
+    fn test_bvh_empty() {
+        let bvh = Bvh::new();
+        assert!(bvh.query_pairs().is_empty());
+    }
+    
+    #[test]
+    fn test_bvh_no_overlap() {
+        let mut bvh = Bvh::new();
+        let (_map, handles) = make_handles(2);
+        
+        bvh.insert(handles[0], Aabb::new(Vec3::ZERO, Vec3::ONE));
+        bvh.insert(handles[1], Aabb::new(Vec3::splat(5.0), Vec3::splat(6.0)));
+        
+        assert!(bvh.query_pairs().is_empty());
+    }
+    
+    #[test]
+    fn test_bvh_overlap() {
+        let mut bvh = Bvh::new();
+        let (_map, handles) = make_handles(2);
+        
+        bvh.insert(handles[0], Aabb::new(Vec3::ZERO, Vec3::ONE));
+        bvh.insert(handles[1], Aabb::new(Vec3::splat(0.5), Vec3::splat(1.5)));
+        
+        let pairs = bvh.query_pairs();
+        assert_eq!(pairs.len(), 1);
+    }
+    
+    #[test]
+    fn test_bvh_many_bodies() {
+        let mut bvh = Bvh::new();
+        let (_map, handles) = make_handles(10);
+        
+        // Create a line of overlapping boxes
+        for (i, &handle) in handles.iter().enumerate() {
+            let x = i as f32 * 0.5;
+            bvh.insert(handle, Aabb::new(
+                Vec3::new(x, 0.0, 0.0),
+                Vec3::new(x + 1.0, 1.0, 1.0),
+            ));
+        }
+        
+        let pairs = bvh.query_pairs();
+        // Each box overlaps with its neighbor
+        assert!(pairs.len() >= 9);
+    }
+    
+    #[test]
+    fn test_bvh_remove() {
+        let mut bvh = Bvh::new();
+        let (_map, handles) = make_handles(2);
+        
+        bvh.insert(handles[0], Aabb::new(Vec3::ZERO, Vec3::ONE));
+        bvh.insert(handles[1], Aabb::new(Vec3::splat(0.5), Vec3::splat(1.5)));
+        assert_eq!(bvh.query_pairs().len(), 1);
+        
+        bvh.remove(handles[1]);
+        assert!(bvh.query_pairs().is_empty());
+    }
+    
+    #[test]
+    fn test_bvh_update() {
+        let mut bvh = Bvh::new();
+        let (_map, handles) = make_handles(2);
+        
+        bvh.insert(handles[0], Aabb::new(Vec3::ZERO, Vec3::ONE));
+        bvh.insert(handles[1], Aabb::new(Vec3::splat(5.0), Vec3::splat(6.0)));
+        assert!(bvh.query_pairs().is_empty());
+        
+        // Move second body to overlap
+        bvh.update(handles[1], Aabb::new(Vec3::splat(0.5), Vec3::splat(1.5)));
+        assert_eq!(bvh.query_pairs().len(), 1);
     }
 }

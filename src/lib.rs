@@ -26,8 +26,8 @@ pub mod world;
 pub mod prelude {
     pub use glam::{Vec3, Mat3, Quat};
     pub use crate::collision::{
-        Aabb, BroadPhase, CollisionShape, ContactManifold, ContactPoint,
-        SpatialHash, SweepAndPrune,
+        Aabb, BroadPhase, Bvh, CollisionShape, ContactManifold, ContactPoint,
+        Face, SpatialHash, SweepAndPrune, gjk_intersection,
     };
     pub use crate::constraints::{
         BallJoint, ConstraintSolver, ContactConstraint, DistanceJoint,
@@ -35,10 +35,12 @@ pub mod prelude {
     };
     pub use crate::dynamics::{
         BodyType, Buoyancy, Drag, ForceGenerator, ForceRegistry, Gravity,
-        IntegratorType, Material, PointForce, RigidBody, Spring,
+        IntegratorType, IntegrationState, IntegrationInput, integrate_state,
+        Material, PointForce, RigidBody, Spring,
     };
     pub use crate::math::Transform;
     pub use crate::world::{
-        Island, IslandDetector, PhysicsStep, PhysicsWorld, StepConfig, StepResult,
+        BodyHandle, Island, IslandDetector, PhysicsStep, PhysicsWorld, 
+        StepConfig, StepResult,
     };
 }

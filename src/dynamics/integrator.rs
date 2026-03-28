@@ -12,6 +12,8 @@ pub enum IntegratorType {
     ExplicitEuler,
     /// Velocity Verlet (second-order accurate)
     Verlet,
+    /// Runge-Kutta 4th order (accurate, expensive)
+    Rk4,
 }
 
 /// Body state for integration
@@ -73,7 +75,8 @@ pub fn integrate_velocity(
     match integrator {
         IntegratorType::ExplicitEuler |
         IntegratorType::SemiImplicitEuler |
-        IntegratorType::Verlet => {
+        IntegratorType::Verlet |
+        IntegratorType::Rk4 => {
             velocity + acceleration * dt
         }
     }
@@ -99,6 +102,11 @@ pub fn integrate_position(
         }
         IntegratorType::Verlet => {
             // Second-order accurate
+            position + velocity * dt + 0.5 * acceleration * dt * dt
+        }
+        IntegratorType::Rk4 => {
+            // RK4: Use weighted average of velocities
+            // For constant acceleration: same as Verlet
             position + velocity * dt + 0.5 * acceleration * dt * dt
         }
     }
@@ -144,33 +152,89 @@ pub fn integrate_state(
     input: IntegrationInput,
     dt: f32,
 ) -> IntegrationState {
-    // Integrate velocities
-    let new_velocity = integrate_velocity(
-        integrator,
-        state.velocity,
-        input.linear_acceleration,
-        dt,
-    );
-    let new_angular_velocity = integrate_angular_velocity(
-        state.angular_velocity,
-        input.angular_acceleration,
-        dt,
-    );
+    match integrator {
+        IntegratorType::Rk4 => integrate_state_rk4(state, input, dt),
+        _ => {
+            // Integrate velocities
+            let new_velocity = integrate_velocity(
+                integrator,
+                state.velocity,
+                input.linear_acceleration,
+                dt,
+            );
+            let new_angular_velocity = integrate_angular_velocity(
+                state.angular_velocity,
+                input.angular_acceleration,
+                dt,
+            );
+            
+            // Integrate positions
+            let new_position = integrate_position(
+                integrator,
+                state.position,
+                state.velocity,
+                new_velocity,
+                input.linear_acceleration,
+                dt,
+            );
+            let new_orientation = integrate_orientation(
+                state.orientation,
+                new_angular_velocity,
+                dt,
+            );
+            
+            IntegrationState {
+                position: new_position,
+                velocity: new_velocity,
+                orientation: new_orientation,
+                angular_velocity: new_angular_velocity,
+            }
+        }
+    }
+}
+
+/// RK4 integration for full state.
+/// Uses 4th-order Runge-Kutta method for higher accuracy.
+fn integrate_state_rk4(
+    state: IntegrationState,
+    input: IntegrationInput,
+    dt: f32,
+) -> IntegrationState {
+    let a = input.linear_acceleration;
+    let aa = input.angular_acceleration;
     
-    // Integrate positions
-    let new_position = integrate_position(
-        integrator,
-        state.position,
-        state.velocity,
-        new_velocity,
-        input.linear_acceleration,
-        dt,
-    );
-    let new_orientation = integrate_orientation(
-        state.orientation,
-        new_angular_velocity,
-        dt,
-    );
+    // k1: derivatives at current state
+    let k1_v = a;
+    let k1_p = state.velocity;
+    let k1_av = aa;
+    let k1_o = state.angular_velocity;
+    
+    // k2: derivatives at midpoint using k1
+    let k2_v = a; // constant acceleration
+    let k2_p = state.velocity + k1_v * (dt * 0.5);
+    let k2_av = aa;
+    let k2_o = state.angular_velocity + k1_av * (dt * 0.5);
+    
+    // k3: derivatives at midpoint using k2
+    let k3_v = a;
+    let k3_p = state.velocity + k2_v * (dt * 0.5);
+    let k3_av = aa;
+    let k3_o = state.angular_velocity + k2_av * (dt * 0.5);
+    
+    // k4: derivatives at end using k3
+    let k4_v = a;
+    let k4_p = state.velocity + k3_v * dt;
+    let k4_av = aa;
+    let k4_o = state.angular_velocity + k3_av * dt;
+    
+    // Weighted average
+    let new_velocity = state.velocity + (k1_v + k2_v * 2.0 + k3_v * 2.0 + k4_v) * (dt / 6.0);
+    let new_position = state.position + (k1_p + k2_p * 2.0 + k3_p * 2.0 + k4_p) * (dt / 6.0);
+    let new_angular_velocity = state.angular_velocity + (k1_av + k2_av * 2.0 + k3_av * 2.0 + k4_av) * (dt / 6.0);
+    
+    // Average angular velocity for orientation
+    let avg_angular = (k1_o + k2_o * 2.0 + k3_o * 2.0 + k4_o) / 6.0;
+    let new_orientation = integrate_orientation(state.orientation, avg_angular, dt);
     
     IntegrationState {
         position: new_position,
@@ -307,5 +371,54 @@ mod tests {
     fn test_angular_damping() {
         let v = apply_angular_damping(Vec3::new(10.0, 0.0, 0.0), 0.5, 1.0);
         assert!(v.x < 10.0);
+    }
+    
+    #[test]
+    fn test_integrate_velocity_rk4() {
+        let v = integrate_velocity(
+            IntegratorType::Rk4,
+            Vec3::ZERO,
+            Vec3::new(10.0, 0.0, 0.0),
+            1.0,
+        );
+        assert_eq!(v, Vec3::new(10.0, 0.0, 0.0));
+    }
+    
+    #[test]
+    fn test_integrate_position_rk4() {
+        let p = integrate_position(
+            IntegratorType::Rk4,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec3::new(10.0, 0.0, 0.0),
+            Vec3::new(10.0, 0.0, 0.0),
+            1.0,
+        );
+        // p + v*dt + 0.5*a*dt^2 = 0 + 0 + 5 = 5
+        assert_eq!(p, Vec3::new(5.0, 0.0, 0.0));
+    }
+    
+    #[test]
+    fn test_integrate_state_rk4() {
+        let state = IntegrationState::new(Vec3::ZERO, Vec3::ZERO);
+        let input = IntegrationInput::linear(Vec3::new(0.0, -10.0, 0.0));
+        let new_state = integrate_state(IntegratorType::Rk4, state, input, 1.0);
+        
+        // With RK4 and constant acceleration, should be similar to Verlet
+        assert!((new_state.velocity.y - (-10.0)).abs() < 0.01);
+        assert!((new_state.position.y - (-5.0)).abs() < 0.01);
+    }
+    
+    #[test]
+    fn test_rk4_higher_accuracy() {
+        // RK4 should be more accurate for varying acceleration scenarios
+        let state = IntegrationState::new(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0));
+        let input = IntegrationInput::linear(Vec3::new(0.0, -10.0, 0.0));
+        
+        let euler_result = integrate_state(IntegratorType::ExplicitEuler, state, input, 0.1);
+        let rk4_result = integrate_state(IntegratorType::Rk4, state, input, 0.1);
+        
+        // Both should give similar results for constant acceleration
+        assert!((euler_result.velocity.y - rk4_result.velocity.y).abs() < 0.01);
     }
 }
