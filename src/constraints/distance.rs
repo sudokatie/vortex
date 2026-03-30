@@ -2,12 +2,13 @@
 
 use glam::{Quat, Vec3};
 use super::joint::{Joint, JointImpulse, JointLimit, JointSpring, PositionResult};
+use crate::world::BodyHandle;
 
 /// Distance joint - keeps two points at a fixed distance
 #[derive(Debug, Clone)]
 pub struct DistanceJoint {
-    body_a: u32,
-    body_b: u32,
+    body_a: BodyHandle,
+    body_b: BodyHandle,
     /// Local anchor on body A
     local_anchor_a: Vec3,
     /// Local anchor on body B
@@ -28,8 +29,8 @@ pub struct DistanceJoint {
 
 impl DistanceJoint {
     pub fn new(
-        body_a: u32,
-        body_b: u32,
+        body_a: BodyHandle,
+        body_b: BodyHandle,
         local_anchor_a: Vec3,
         local_anchor_b: Vec3,
         rest_length: f32,
@@ -95,7 +96,7 @@ impl DistanceJoint {
 }
 
 impl Joint for DistanceJoint {
-    fn bodies(&self) -> (u32, u32) {
+    fn bodies(&self) -> (BodyHandle, BodyHandle) {
         (self.body_a, self.body_b)
     }
     
@@ -177,24 +178,35 @@ impl Joint for DistanceJoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use slotmap::SlotMap;
+
+    fn make_handles() -> (SlotMap<BodyHandle, ()>, BodyHandle, BodyHandle) {
+        let mut map = SlotMap::with_key();
+        let h1 = map.insert(());
+        let h2 = map.insert(());
+        (map, h1, h2)
+    }
 
     #[test]
     fn test_distance_joint_new() {
-        let j = DistanceJoint::new(0, 1, Vec3::ZERO, Vec3::ZERO, 1.0);
-        assert_eq!(j.bodies(), (0, 1));
+        let (_map, h1, h2) = make_handles();
+        let j = DistanceJoint::new(h1, h2, Vec3::ZERO, Vec3::ZERO, 1.0);
+        assert_eq!(j.bodies(), (h1, h2));
         assert_eq!(j.rest_length, 1.0);
     }
 
     #[test]
     fn test_distance_joint_with_limit() {
-        let j = DistanceJoint::new(0, 1, Vec3::ZERO, Vec3::ZERO, 1.0)
+        let (_map, h1, h2) = make_handles();
+        let j = DistanceJoint::new(h1, h2, Vec3::ZERO, Vec3::ZERO, 1.0)
             .with_limit(0.5, 1.5);
         assert!(j.limit.enabled);
     }
 
     #[test]
     fn test_distance_joint_prepare() {
-        let mut j = DistanceJoint::new(0, 1, Vec3::ZERO, Vec3::ZERO, 1.0);
+        let (_map, h1, h2) = make_handles();
+        let mut j = DistanceJoint::new(h1, h2, Vec3::ZERO, Vec3::ZERO, 1.0);
         j.prepare(
             Vec3::ZERO, Quat::IDENTITY,
             Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY,
@@ -205,7 +217,8 @@ mod tests {
 
     #[test]
     fn test_distance_joint_current_length() {
-        let j = DistanceJoint::new(0, 1, Vec3::ZERO, Vec3::ZERO, 1.0);
+        let (_map, h1, h2) = make_handles();
+        let j = DistanceJoint::new(h1, h2, Vec3::ZERO, Vec3::ZERO, 1.0);
         let len = j.current_length(
             Vec3::ZERO, Quat::IDENTITY,
             Vec3::new(3.0, 4.0, 0.0), Quat::IDENTITY
@@ -215,7 +228,8 @@ mod tests {
 
     #[test]
     fn test_distance_joint_solve_velocity() {
-        let mut j = DistanceJoint::new(0, 1, Vec3::ZERO, Vec3::ZERO, 1.0);
+        let (_map, h1, h2) = make_handles();
+        let mut j = DistanceJoint::new(h1, h2, Vec3::ZERO, Vec3::ZERO, 1.0);
         j.prepare(
             Vec3::ZERO, Quat::IDENTITY,
             Vec3::X, Quat::IDENTITY,
@@ -234,7 +248,8 @@ mod tests {
 
     #[test]
     fn test_distance_joint_solve_position() {
-        let mut j = DistanceJoint::new(0, 1, Vec3::ZERO, Vec3::ZERO, 1.0);
+        let (_map, h1, h2) = make_handles();
+        let mut j = DistanceJoint::new(h1, h2, Vec3::ZERO, Vec3::ZERO, 1.0);
         let result = j.solve_position(
             Vec3::ZERO, Quat::IDENTITY,
             Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY,

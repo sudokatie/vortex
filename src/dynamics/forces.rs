@@ -1,11 +1,17 @@
 // Force generators for physics simulation
 
 use glam::Vec3;
+use super::body::RigidBody;
 
 /// Force generator trait - applies forces to bodies
 pub trait ForceGenerator: Send + Sync {
     /// Apply force to a body given its state
     fn apply(&self, position: Vec3, velocity: Vec3, mass: f32) -> ForceOutput;
+    
+    /// Apply force to a rigid body (convenience method)
+    fn apply_to_body(&self, body: &RigidBody) -> ForceOutput {
+        self.apply(body.position, body.linear_velocity, body.mass)
+    }
     
     /// Whether this generator is still active
     fn is_active(&self) -> bool {
@@ -252,6 +258,11 @@ impl ForceRegistry {
         }
         
         total
+    }
+    
+    /// Apply all generators to a rigid body (convenience method)
+    pub fn apply_all_to_body(&self, body: &RigidBody) -> ForceOutput {
+        self.apply_all(body.position, body.linear_velocity, body.mass)
     }
     
     pub fn clear(&mut self) {

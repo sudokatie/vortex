@@ -6,6 +6,7 @@ pub mod contact;
 pub mod epa;
 pub mod gjk;
 pub mod shapes;
+pub mod simd;
 
 pub use aabb::Aabb;
 pub use broadphase::{BroadPhase, Bvh, SweepAndPrune, SpatialHash};
@@ -13,3 +14,4 @@ pub use contact::{ContactPoint, ContactManifold, generate_contacts, clip_polygon
 pub use epa::{PenetrationInfo, epa};
 pub use gjk::{gjk_intersection, gjk_distance};
 pub use shapes::{CollisionShape, Face};
+pub use simd::{SimdVec3x4, SimdAabb4, simd_sphere_support, simd_box_support};

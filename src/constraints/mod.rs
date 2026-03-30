@@ -8,7 +8,8 @@ pub mod joint;
 pub mod solver;
 
 pub use ball::BallJoint;
-pub use contact::{ContactConstraint, ContactConstraintPoint, ImpulseResult, PositionCorrection};
+pub use contact::{ContactConstraint, ContactConstraintPoint, ImpulseResult};
+pub use solver::PositionCorrection;
 pub use distance::DistanceJoint;
 pub use hinge::HingeJoint;
 pub use joint::{Joint, JointImpulse, JointLimit, JointMotor, JointSpring, PositionResult};

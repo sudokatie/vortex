@@ -43,6 +43,14 @@ impl Aabb {
             max: Vec3::splat(f32::MIN),
         }
     }
+    
+    /// Create an AABB from center point and half-extents.
+    pub fn from_center_extents(center: Vec3, extents: Vec3) -> Self {
+        Self {
+            min: center - extents,
+            max: center + extents,
+        }
+    }
 
     /// Check if this AABB intersects another.
     pub fn intersects(&self, other: &Aabb) -> bool {
@@ -62,6 +70,11 @@ impl Aabb {
             && point.y <= self.max.y
             && point.z >= self.min.z
             && point.z <= self.max.z
+    }
+    
+    /// Alias for contains() - check if this AABB contains a point.
+    pub fn contains_point(&self, point: Vec3) -> bool {
+        self.contains(point)
     }
 
     /// Check if this AABB fully contains another.
@@ -96,6 +109,11 @@ impl Aabb {
     /// Get the half-extents (half-size) of the AABB.
     pub fn half_extents(&self) -> Vec3 {
         (self.max - self.min) * 0.5
+    }
+    
+    /// Alias for half_extents() - common in physics engines.
+    pub fn extents(&self) -> Vec3 {
+        self.half_extents()
     }
 
     /// Get the full size of the AABB.

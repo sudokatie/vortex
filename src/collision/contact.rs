@@ -1,79 +1,99 @@
-// Contact generation and manifold management
+//! Contact generation and manifold management
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
+use crate::world::BodyHandle;
 
 /// Single contact point between two bodies
 #[derive(Debug, Clone, Copy)]
 pub struct ContactPoint {
-    /// Contact point in world space on body A
-    pub point_a: Vec3,
-    /// Contact point in world space on body B
-    pub point_b: Vec3,
-    /// Contact normal (from A to B)
-    pub normal: Vec3,
+    /// Contact point in local space on body A
+    pub local_a: Vec3,
+    /// Contact point in local space on body B
+    pub local_b: Vec3,
     /// Penetration depth (positive when overlapping)
-    pub depth: f32,
+    pub penetration: f32,
     /// Cached normal impulse for warm starting
     pub normal_impulse: f32,
-    /// Cached tangent impulse for warm starting
-    pub tangent_impulse: Vec3,
+    /// Cached tangent impulse for warm starting (2D friction)
+    pub tangent_impulse: Vec2,
 }
 
 impl ContactPoint {
-    pub fn new(point_a: Vec3, point_b: Vec3, normal: Vec3, depth: f32) -> Self {
+    pub fn new(local_a: Vec3, local_b: Vec3, normal: Vec3, penetration: f32) -> Self {
+        let _ = normal; // Used for orientation but stored in manifold
         Self {
-            point_a,
-            point_b,
-            normal,
-            depth,
+            local_a,
+            local_b,
+            penetration,
             normal_impulse: 0.0,
-            tangent_impulse: Vec3::ZERO,
+            tangent_impulse: Vec2::ZERO,
+        }
+    }
+    
+    /// Create with world-space points and body positions
+    pub fn from_world(
+        point_a: Vec3, 
+        point_b: Vec3, 
+        body_a_pos: Vec3, 
+        body_b_pos: Vec3,
+        penetration: f32,
+    ) -> Self {
+        Self {
+            local_a: point_a - body_a_pos,
+            local_b: point_b - body_b_pos,
+            penetration,
+            normal_impulse: 0.0,
+            tangent_impulse: Vec2::ZERO,
         }
     }
 
-    /// Local point on body A (for manifold persistence)
-    pub fn local_point_a(&self, body_a_pos: Vec3) -> Vec3 {
-        self.point_a - body_a_pos
+    /// Get world-space point on body A
+    pub fn world_point_a(&self, body_a_pos: Vec3) -> Vec3 {
+        body_a_pos + self.local_a
     }
 
-    /// Local point on body B (for manifold persistence)
-    pub fn local_point_b(&self, body_b_pos: Vec3) -> Vec3 {
-        self.point_b - body_b_pos
+    /// Get world-space point on body B
+    pub fn world_point_b(&self, body_b_pos: Vec3) -> Vec3 {
+        body_b_pos + self.local_b
     }
 }
 
 /// Contact manifold - collection of contact points between two bodies
 #[derive(Debug, Clone)]
 pub struct ContactManifold {
-    /// Body A handle/index
-    pub body_a: u32,
-    /// Body B handle/index
-    pub body_b: u32,
+    /// Body A handle
+    pub body_a: BodyHandle,
+    /// Body B handle
+    pub body_b: BodyHandle,
     /// Contact points (max 4 for 3D)
-    pub points: arrayvec::ArrayVec<ContactPoint, 4>,
-    /// Contact normal (averaged)
+    pub contacts: arrayvec::ArrayVec<ContactPoint, 4>,
+    /// Contact normal (from A to B)
     pub normal: Vec3,
 }
 
 impl ContactManifold {
-    pub fn new(body_a: u32, body_b: u32) -> Self {
+    pub fn new(body_a: BodyHandle, body_b: BodyHandle) -> Self {
         Self {
             body_a,
             body_b,
-            points: arrayvec::ArrayVec::new(),
+            contacts: arrayvec::ArrayVec::new(),
             normal: Vec3::ZERO,
         }
     }
 
     /// Add a contact point, maintaining max 4 points
     pub fn add_point(&mut self, point: ContactPoint) {
-        if self.points.len() < 4 {
-            self.points.push(point);
+        if self.contacts.len() < 4 {
+            self.contacts.push(point);
         } else {
             // Replace the point that maximizes contact area
             self.replace_worst_point(point);
         }
-        self.update_normal();
+    }
+    
+    /// Set the contact normal
+    pub fn set_normal(&mut self, normal: Vec3) {
+        self.normal = normal;
     }
 
     /// Find and replace the point that contributes least to manifold area
@@ -81,24 +101,24 @@ impl ContactManifold {
         let mut worst_idx = 0;
         let mut worst_area = f32::MAX;
 
-        for i in 0..self.points.len() {
+        for i in 0..self.contacts.len() {
             // Calculate area without this point
-            let area = self.area_without_point(i, new_point.point_a);
+            let area = self.area_without_point(i, new_point.local_a);
             if area < worst_area {
                 worst_area = area;
                 worst_idx = i;
             }
         }
 
-        self.points[worst_idx] = new_point;
+        self.contacts[worst_idx] = new_point;
     }
 
     /// Calculate manifold area if we replaced point at idx with new_point
     fn area_without_point(&self, skip_idx: usize, new_point: Vec3) -> f32 {
         let mut pts: arrayvec::ArrayVec<Vec3, 4> = arrayvec::ArrayVec::new();
-        for (i, p) in self.points.iter().enumerate() {
+        for (i, p) in self.contacts.iter().enumerate() {
             if i != skip_idx {
-                pts.push(p.point_a);
+                pts.push(p.local_a);
             }
         }
         pts.push(new_point);
@@ -117,51 +137,56 @@ impl ContactManifold {
         area
     }
 
-    fn update_normal(&mut self) {
-        if self.points.is_empty() {
-            self.normal = Vec3::ZERO;
-        } else {
-            let sum: Vec3 = self.points.iter().map(|p| p.normal).sum();
-            self.normal = sum.normalize_or_zero();
-        }
-    }
-
     /// Get deepest penetration point
     pub fn deepest_point(&self) -> Option<&ContactPoint> {
-        self.points.iter().max_by(|a, b| {
-            a.depth.partial_cmp(&b.depth).unwrap_or(std::cmp::Ordering::Equal)
+        self.contacts.iter().max_by(|a, b| {
+            a.penetration.partial_cmp(&b.penetration).unwrap_or(std::cmp::Ordering::Equal)
         })
     }
 
-    /// Refresh contacts - remove separating points and update positions
+    /// Refresh contacts - remove separating points
     pub fn refresh(&mut self, threshold: f32) {
-        self.points.retain(|p| p.depth > -threshold);
+        self.contacts.retain(|p| p.penetration > -threshold);
     }
 
     /// Clear cached impulses
     pub fn clear_impulses(&mut self) {
-        for p in &mut self.points {
+        for p in &mut self.contacts {
             p.normal_impulse = 0.0;
-            p.tangent_impulse = Vec3::ZERO;
+            p.tangent_impulse = Vec2::ZERO;
         }
+    }
+    
+    /// Number of contact points
+    pub fn len(&self) -> usize {
+        self.contacts.len()
+    }
+    
+    /// Check if empty
+    pub fn is_empty(&self) -> bool {
+        self.contacts.is_empty()
     }
 }
 
 /// Generate contact manifold from GJK/EPA results
 pub fn generate_contacts(
-    body_a: u32,
-    body_b: u32,
+    body_a: BodyHandle,
+    body_b: BodyHandle,
     penetration_normal: Vec3,
     penetration_depth: f32,
     point_on_a: Vec3,
     point_on_b: Vec3,
+    body_a_pos: Vec3,
+    body_b_pos: Vec3,
 ) -> ContactManifold {
     let mut manifold = ContactManifold::new(body_a, body_b);
+    manifold.set_normal(penetration_normal);
     
-    let contact = ContactPoint::new(
+    let contact = ContactPoint::from_world(
         point_on_a,
         point_on_b,
-        penetration_normal,
+        body_a_pos,
+        body_b_pos,
         penetration_depth,
     );
     manifold.add_point(contact);
@@ -214,19 +239,19 @@ pub fn reduce_manifold(points: &[ContactPoint]) -> arrayvec::ArrayVec<ContactPoi
     // Find deepest point
     let deepest_idx = points.iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.depth.partial_cmp(&b.depth).unwrap())
+        .max_by(|(_, a), (_, b)| a.penetration.partial_cmp(&b.penetration).unwrap())
         .map(|(i, _)| i)
         .unwrap_or(0);
     result.push(points[deepest_idx]);
 
     // Find point furthest from first
-    let first = points[deepest_idx].point_a;
+    let first = points[deepest_idx].local_a;
     let second_idx = points.iter()
         .enumerate()
         .filter(|(i, _)| *i != deepest_idx)
         .max_by(|(_, a), (_, b)| {
-            let da = (a.point_a - first).length_squared();
-            let db = (b.point_a - first).length_squared();
+            let da = (a.local_a - first).length_squared();
+            let db = (b.local_a - first).length_squared();
             da.partial_cmp(&db).unwrap()
         })
         .map(|(i, _)| i)
@@ -234,14 +259,14 @@ pub fn reduce_manifold(points: &[ContactPoint]) -> arrayvec::ArrayVec<ContactPoi
     result.push(points[second_idx]);
 
     // Find point furthest from line (first, second)
-    let second = points[second_idx].point_a;
+    let second = points[second_idx].local_a;
     let line_dir = (second - first).normalize_or_zero();
     let third_idx = points.iter()
         .enumerate()
         .filter(|(i, _)| *i != deepest_idx && *i != second_idx)
         .max_by(|(_, a), (_, b)| {
-            let da = point_line_dist(a.point_a, first, line_dir);
-            let db = point_line_dist(b.point_a, first, line_dir);
+            let da = point_line_dist(a.local_a, first, line_dir);
+            let db = point_line_dist(b.local_a, first, line_dir);
             da.partial_cmp(&db).unwrap()
         })
         .map(|(i, _)| i);
@@ -252,17 +277,17 @@ pub fn reduce_manifold(points: &[ContactPoint]) -> arrayvec::ArrayVec<ContactPoi
 
     // Find point furthest from triangle plane
     if result.len() >= 3 {
-        let p0 = result[0].point_a;
-        let p1 = result[1].point_a;
-        let p2 = result[2].point_a;
+        let p0 = result[0].local_a;
+        let p1 = result[1].local_a;
+        let p2 = result[2].local_a;
         let tri_normal = (p1 - p0).cross(p2 - p0).normalize_or_zero();
         
         let fourth_idx = points.iter()
             .enumerate()
-            .filter(|(i, _)| *i != deepest_idx && *i != second_idx && (third_idx != Some(*i)))
+            .filter(|(i, _)| *i != deepest_idx && *i != second_idx && third_idx != Some(*i))
             .max_by(|(_, a), (_, b)| {
-                let da = (a.point_a - p0).dot(tri_normal).abs();
-                let db = (b.point_a - p0).dot(tri_normal).abs();
+                let da = (a.local_a - p0).dot(tri_normal).abs();
+                let db = (b.local_a - p0).dot(tri_normal).abs();
                 da.partial_cmp(&db).unwrap()
             })
             .map(|(i, _)| i);
@@ -285,6 +310,14 @@ fn point_line_dist(point: Vec3, line_point: Vec3, line_dir: Vec3) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use slotmap::SlotMap;
+
+    fn make_handles() -> (SlotMap<BodyHandle, ()>, BodyHandle, BodyHandle) {
+        let mut map = SlotMap::with_key();
+        let h1 = map.insert(());
+        let h2 = map.insert(());
+        (map, h1, h2)
+    }
 
     #[test]
     fn test_contact_point_new() {
@@ -294,21 +327,46 @@ mod tests {
             Vec3::new(-1.0, 0.0, 0.0),
             0.1,
         );
-        assert_eq!(cp.depth, 0.1);
+        assert_eq!(cp.penetration, 0.1);
         assert_eq!(cp.normal_impulse, 0.0);
+        assert_eq!(cp.tangent_impulse, Vec2::ZERO);
+    }
+
+    #[test]
+    fn test_contact_point_from_world() {
+        let cp = ContactPoint::from_world(
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(3.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(4.0, 0.0, 0.0),
+            0.1,
+        );
+        assert_eq!(cp.local_a, Vec3::new(1.0, 0.0, 0.0));
+        assert_eq!(cp.local_b, Vec3::new(-1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn test_manifold_new() {
+        let (_map, h1, h2) = make_handles();
+        let m = ContactManifold::new(h1, h2);
+        assert_eq!(m.body_a, h1);
+        assert_eq!(m.body_b, h2);
+        assert!(m.is_empty());
     }
 
     #[test]
     fn test_manifold_add_point() {
-        let mut m = ContactManifold::new(0, 1);
+        let (_map, h1, h2) = make_handles();
+        let mut m = ContactManifold::new(h1, h2);
         let cp = ContactPoint::new(Vec3::ZERO, Vec3::X, Vec3::X, 0.1);
         m.add_point(cp);
-        assert_eq!(m.points.len(), 1);
+        assert_eq!(m.len(), 1);
     }
 
     #[test]
     fn test_manifold_max_points() {
-        let mut m = ContactManifold::new(0, 1);
+        let (_map, h1, h2) = make_handles();
+        let mut m = ContactManifold::new(h1, h2);
         for i in 0..6 {
             let cp = ContactPoint::new(
                 Vec3::new(i as f32, 0.0, 0.0),
@@ -318,38 +376,45 @@ mod tests {
             );
             m.add_point(cp);
         }
-        assert_eq!(m.points.len(), 4);
+        assert_eq!(m.len(), 4);
     }
 
     #[test]
     fn test_manifold_deepest() {
-        let mut m = ContactManifold::new(0, 1);
+        let (_map, h1, h2) = make_handles();
+        let mut m = ContactManifold::new(h1, h2);
         m.add_point(ContactPoint::new(Vec3::ZERO, Vec3::X, Vec3::X, 0.1));
         m.add_point(ContactPoint::new(Vec3::Y, Vec3::new(1.0, 1.0, 0.0), Vec3::X, 0.5));
         let deepest = m.deepest_point().unwrap();
-        assert_eq!(deepest.depth, 0.5);
+        assert_eq!(deepest.penetration, 0.5);
     }
 
     #[test]
     fn test_manifold_refresh() {
-        let mut m = ContactManifold::new(0, 1);
+        let (_map, h1, h2) = make_handles();
+        let mut m = ContactManifold::new(h1, h2);
         m.add_point(ContactPoint::new(Vec3::ZERO, Vec3::X, Vec3::X, 0.1));
         m.add_point(ContactPoint::new(Vec3::Y, Vec3::X, Vec3::X, -0.2));
         m.refresh(0.1);
-        assert_eq!(m.points.len(), 1);
+        assert_eq!(m.len(), 1);
     }
 
     #[test]
     fn test_generate_contacts() {
-        let m = generate_contacts(0, 1, Vec3::X, 0.1, Vec3::ZERO, Vec3::new(0.1, 0.0, 0.0));
-        assert_eq!(m.body_a, 0);
-        assert_eq!(m.body_b, 1);
-        assert_eq!(m.points.len(), 1);
+        let (_map, h1, h2) = make_handles();
+        let m = generate_contacts(
+            h1, h2, 
+            Vec3::X, 0.1, 
+            Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.9, 0.0, 0.0),
+            Vec3::ZERO, Vec3::ZERO,
+        );
+        assert_eq!(m.body_a, h1);
+        assert_eq!(m.body_b, h2);
+        assert_eq!(m.len(), 1);
     }
 
     #[test]
     fn test_clip_polygon_inside() {
-        // Plane at y=-1 with normal Y - all vertices have y >= 0, so all are "inside"
         let verts = vec![Vec3::ZERO, Vec3::X, Vec3::new(1.0, 1.0, 0.0), Vec3::Y];
         let result = clip_polygon(&verts, Vec3::Y, -1.0);
         assert_eq!(result.len(), 4);

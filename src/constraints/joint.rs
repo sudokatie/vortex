@@ -1,11 +1,12 @@
 // Joint trait and common types
 
 use glam::Vec3;
+use crate::world::BodyHandle;
 
 /// Joint connecting two bodies
 pub trait Joint: Send + Sync {
     /// Get body handles
-    fn bodies(&self) -> (u32, u32);
+    fn bodies(&self) -> (BodyHandle, BodyHandle);
     
     /// Apply warm starting impulses
     fn warm_start(&self) -> Vec<JointImpulse>;
@@ -48,8 +49,8 @@ pub trait Joint: Send + Sync {
 /// Impulse from joint solver
 #[derive(Debug, Clone, Copy)]
 pub struct JointImpulse {
-    pub body_a: u32,
-    pub body_b: u32,
+    pub body_a: BodyHandle,
+    pub body_b: BodyHandle,
     /// Linear impulse
     pub linear: Vec3,
     /// Angular impulse for body A
@@ -59,7 +60,7 @@ pub struct JointImpulse {
 }
 
 impl JointImpulse {
-    pub fn new(body_a: u32, body_b: u32, linear: Vec3) -> Self {
+    pub fn new(body_a: BodyHandle, body_b: BodyHandle, linear: Vec3) -> Self {
         Self {
             body_a,
             body_b,
@@ -191,12 +192,21 @@ impl JointSpring {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use slotmap::SlotMap;
+
+    fn make_handles() -> (SlotMap<BodyHandle, ()>, BodyHandle, BodyHandle) {
+        let mut map = SlotMap::with_key();
+        let h1 = map.insert(());
+        let h2 = map.insert(());
+        (map, h1, h2)
+    }
 
     #[test]
     fn test_joint_impulse_new() {
-        let imp = JointImpulse::new(0, 1, Vec3::X);
-        assert_eq!(imp.body_a, 0);
-        assert_eq!(imp.body_b, 1);
+        let (_map, h1, h2) = make_handles();
+        let imp = JointImpulse::new(h1, h2, Vec3::X);
+        assert_eq!(imp.body_a, h1);
+        assert_eq!(imp.body_b, h2);
         assert_eq!(imp.linear, Vec3::X);
     }
 

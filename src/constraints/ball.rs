@@ -2,12 +2,13 @@
 
 use glam::{Quat, Vec3};
 use super::joint::{Joint, JointImpulse, PositionResult};
+use crate::world::BodyHandle;
 
 /// Ball joint - point-to-point constraint allowing free rotation
 #[derive(Debug, Clone)]
 pub struct BallJoint {
-    body_a: u32,
-    body_b: u32,
+    body_a: BodyHandle,
+    body_b: BodyHandle,
     /// Local anchor on body A
     local_anchor_a: Vec3,
     /// Local anchor on body B
@@ -24,8 +25,8 @@ pub struct BallJoint {
 
 impl BallJoint {
     pub fn new(
-        body_a: u32,
-        body_b: u32,
+        body_a: BodyHandle,
+        body_b: BodyHandle,
         local_anchor_a: Vec3,
         local_anchor_b: Vec3,
     ) -> Self {
@@ -43,8 +44,8 @@ impl BallJoint {
     
     /// Create ball joint from world-space anchor point
     pub fn from_world_anchor(
-        body_a: u32,
-        body_b: u32,
+        body_a: BodyHandle,
+        body_b: BodyHandle,
         pos_a: Vec3,
         rot_a: Quat,
         pos_b: Vec3,
@@ -81,7 +82,7 @@ impl BallJoint {
 }
 
 impl Joint for BallJoint {
-    fn bodies(&self) -> (u32, u32) {
+    fn bodies(&self) -> (BodyHandle, BodyHandle) {
         (self.body_a, self.body_b)
     }
     
@@ -156,17 +157,27 @@ impl Joint for BallJoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use slotmap::SlotMap;
+
+    fn make_handles() -> (SlotMap<BodyHandle, ()>, BodyHandle, BodyHandle) {
+        let mut map = SlotMap::with_key();
+        let h1 = map.insert(());
+        let h2 = map.insert(());
+        (map, h1, h2)
+    }
 
     #[test]
     fn test_ball_joint_new() {
-        let j = BallJoint::new(0, 1, Vec3::X, Vec3::NEG_X);
-        assert_eq!(j.bodies(), (0, 1));
+        let (_map, h1, h2) = make_handles();
+        let j = BallJoint::new(h1, h2, Vec3::X, Vec3::NEG_X);
+        assert_eq!(j.bodies(), (h1, h2));
     }
 
     #[test]
     fn test_ball_joint_from_world() {
+        let (_map, h1, h2) = make_handles();
         let j = BallJoint::from_world_anchor(
-            0, 1,
+            h1, h2,
             Vec3::ZERO, Quat::IDENTITY,
             Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY,
             Vec3::new(1.0, 0.0, 0.0)
@@ -177,7 +188,8 @@ mod tests {
 
     #[test]
     fn test_ball_joint_prepare() {
-        let mut j = BallJoint::new(0, 1, Vec3::X, Vec3::NEG_X);
+        let (_map, h1, h2) = make_handles();
+        let mut j = BallJoint::new(h1, h2, Vec3::X, Vec3::NEG_X);
         j.prepare(
             Vec3::ZERO, Quat::IDENTITY,
             Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY,
@@ -188,7 +200,8 @@ mod tests {
 
     #[test]
     fn test_ball_joint_separation() {
-        let mut j = BallJoint::new(0, 1, Vec3::X, Vec3::NEG_X);
+        let (_map, h1, h2) = make_handles();
+        let mut j = BallJoint::new(h1, h2, Vec3::X, Vec3::NEG_X);
         j.prepare(
             Vec3::ZERO, Quat::IDENTITY,
             Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY,
@@ -200,7 +213,8 @@ mod tests {
 
     #[test]
     fn test_ball_joint_solve_position() {
-        let mut j = BallJoint::new(0, 1, Vec3::ZERO, Vec3::ZERO);
+        let (_map, h1, h2) = make_handles();
+        let mut j = BallJoint::new(h1, h2, Vec3::ZERO, Vec3::ZERO);
         let result = j.solve_position(
             Vec3::ZERO, Quat::IDENTITY,
             Vec3::new(1.0, 0.0, 0.0), Quat::IDENTITY,
@@ -214,7 +228,8 @@ mod tests {
 
     #[test]
     fn test_ball_joint_no_correction_when_aligned() {
-        let mut j = BallJoint::new(0, 1, Vec3::X, Vec3::NEG_X);
+        let (_map, h1, h2) = make_handles();
+        let mut j = BallJoint::new(h1, h2, Vec3::X, Vec3::NEG_X);
         let result = j.solve_position(
             Vec3::ZERO, Quat::IDENTITY,
             Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY,
@@ -227,7 +242,8 @@ mod tests {
 
     #[test]
     fn test_ball_joint_warm_start_empty() {
-        let j = BallJoint::new(0, 1, Vec3::X, Vec3::NEG_X);
+        let (_map, h1, h2) = make_handles();
+        let j = BallJoint::new(h1, h2, Vec3::X, Vec3::NEG_X);
         let impulses = j.warm_start();
         assert!(impulses.is_empty());
     }

@@ -1,4 +1,8 @@
 //! Integration tests for vortex physics engine
+//!
+//! These tests require the `dim3` feature (enabled by default).
+
+#![cfg(feature = "dim3")]
 
 use vortex::prelude::*;
 use vortex::math::Transform;

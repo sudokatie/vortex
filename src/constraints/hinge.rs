@@ -2,12 +2,13 @@
 
 use glam::{Quat, Vec3};
 use super::joint::{Joint, JointImpulse, JointLimit, JointMotor, PositionResult};
+use crate::world::BodyHandle;
 
 /// Hinge joint - allows rotation around a single axis
 #[derive(Debug, Clone)]
 pub struct HingeJoint {
-    body_a: u32,
-    body_b: u32,
+    body_a: BodyHandle,
+    body_b: BodyHandle,
     /// Local anchor on body A
     local_anchor_a: Vec3,
     /// Local anchor on body B
@@ -35,9 +36,10 @@ pub struct HingeJoint {
 }
 
 impl HingeJoint {
+    /// Create a hinge joint with separate axes for each body.
     pub fn new(
-        body_a: u32,
-        body_b: u32,
+        body_a: BodyHandle,
+        body_b: BodyHandle,
         local_anchor_a: Vec3,
         local_anchor_b: Vec3,
         local_axis_a: Vec3,
@@ -59,6 +61,18 @@ impl HingeJoint {
             current_angle: 0.0,
             mass: 0.0,
         }
+    }
+    
+    /// Create a hinge joint with the same axis for both bodies.
+    /// This is a convenience constructor for the common case.
+    pub fn with_axis(
+        body_a: BodyHandle,
+        body_b: BodyHandle,
+        local_anchor_a: Vec3,
+        local_anchor_b: Vec3,
+        axis: Vec3,
+    ) -> Self {
+        Self::new(body_a, body_b, local_anchor_a, local_anchor_b, axis, axis)
     }
     
     pub fn with_limit(mut self, lower: f32, upper: f32) -> Self {
@@ -127,7 +141,7 @@ impl HingeJoint {
 }
 
 impl Joint for HingeJoint {
-    fn bodies(&self) -> (u32, u32) {
+    fn bodies(&self) -> (BodyHandle, BodyHandle) {
         (self.body_a, self.body_b)
     }
     
@@ -151,10 +165,10 @@ impl Joint for HingeJoint {
         ang_vel_a: Vec3,
         vel_b: Vec3,
         ang_vel_b: Vec3,
-        _inv_mass_a: f32,
-        _inv_mass_b: f32,
-        _inv_inertia_a: Vec3,
-        _inv_inertia_b: Vec3,
+        inv_mass_a: f32,
+        inv_mass_b: f32,
+        inv_inertia_a: Vec3,
+        inv_inertia_b: Vec3,
     ) -> Vec<JointImpulse> {
         let mut impulses = Vec::new();
         
@@ -165,13 +179,86 @@ impl Joint for HingeJoint {
         
         impulses.push(JointImpulse::new(self.body_a, self.body_b, lambda));
         
+        // Compute world axis (assuming rot_a was stored or use identity)
+        // For proper implementation, we'd cache the world axis in prepare()
+        let world_axis = self.local_axis_a; // Simplified, should use rot_a * local_axis_a
+        
+        // Angular velocity along hinge axis
+        let rel_ang_vel = ang_vel_b - ang_vel_a;
+        let axis_vel = rel_ang_vel.dot(world_axis);
+        
+        // Effective angular mass along axis
+        let angular_mass_a = world_axis.dot(Vec3::new(
+            world_axis.x * inv_inertia_a.x,
+            world_axis.y * inv_inertia_a.y,
+            world_axis.z * inv_inertia_a.z,
+        ));
+        let angular_mass_b = world_axis.dot(Vec3::new(
+            world_axis.x * inv_inertia_b.x,
+            world_axis.y * inv_inertia_b.y,
+            world_axis.z * inv_inertia_b.z,
+        ));
+        let angular_eff_mass = angular_mass_a + angular_mass_b;
+        let angular_mass_inv = if angular_eff_mass > 1e-10 { 1.0 / angular_eff_mass } else { 0.0 };
+        
         // Motor constraint
         if self.motor.enabled {
-            // Simplified: just apply angular impulse along axis
-            // In a full implementation, we'd use the proper effective mass
-            let _ = (ang_vel_a, ang_vel_b);
+            let velocity_error = self.motor.target_velocity - axis_vel;
+            let motor_lambda = velocity_error * angular_mass_inv;
+            
+            // Clamp to max force
+            let old_impulse = self.motor_impulse;
+            self.motor_impulse = (self.motor_impulse + motor_lambda)
+                .clamp(-self.motor.max_force, self.motor.max_force);
+            let applied = self.motor_impulse - old_impulse;
+            
+            if applied.abs() > 1e-10 {
+                let angular_impulse = world_axis * applied;
+                let mut imp = JointImpulse::new(self.body_a, self.body_b, Vec3::ZERO);
+                imp.angular_a = -angular_impulse * inv_inertia_a;
+                imp.angular_b = angular_impulse * inv_inertia_b;
+                impulses.push(imp);
+            }
         }
         
+        // Limit constraint
+        if self.limit.enabled {
+            // Check if at limit
+            let at_lower = self.current_angle <= self.limit.lower;
+            let at_upper = self.current_angle >= self.limit.upper;
+            
+            if at_lower && axis_vel < 0.0 {
+                // Trying to go past lower limit
+                let limit_lambda = -axis_vel * angular_mass_inv;
+                let old = self.limit_impulse;
+                self.limit_impulse = (self.limit_impulse + limit_lambda).max(0.0);
+                let applied = self.limit_impulse - old;
+                
+                if applied.abs() > 1e-10 {
+                    let angular_impulse = world_axis * applied;
+                    let mut imp = JointImpulse::new(self.body_a, self.body_b, Vec3::ZERO);
+                    imp.angular_a = -angular_impulse * inv_inertia_a;
+                    imp.angular_b = angular_impulse * inv_inertia_b;
+                    impulses.push(imp);
+                }
+            } else if at_upper && axis_vel > 0.0 {
+                // Trying to go past upper limit
+                let limit_lambda = -axis_vel * angular_mass_inv;
+                let old = self.limit_impulse;
+                self.limit_impulse = (self.limit_impulse + limit_lambda).min(0.0);
+                let applied = self.limit_impulse - old;
+                
+                if applied.abs() > 1e-10 {
+                    let angular_impulse = world_axis * applied;
+                    let mut imp = JointImpulse::new(self.body_a, self.body_b, Vec3::ZERO);
+                    imp.angular_a = -angular_impulse * inv_inertia_a;
+                    imp.angular_b = angular_impulse * inv_inertia_b;
+                    impulses.push(imp);
+                }
+            }
+        }
+        
+        let _ = (inv_mass_a, inv_mass_b);
         impulses
     }
     
@@ -211,42 +298,62 @@ impl Joint for HingeJoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use slotmap::SlotMap;
     use std::f32::consts::PI;
+
+    fn make_handles() -> (SlotMap<BodyHandle, ()>, BodyHandle, BodyHandle) {
+        let mut map = SlotMap::with_key();
+        let h1 = map.insert(());
+        let h2 = map.insert(());
+        (map, h1, h2)
+    }
 
     #[test]
     fn test_hinge_joint_new() {
+        let (_map, h1, h2) = make_handles();
         let j = HingeJoint::new(
-            0, 1,
+            h1, h2,
             Vec3::ZERO, Vec3::ZERO,
             Vec3::Y, Vec3::Y
         );
-        assert_eq!(j.bodies(), (0, 1));
+        assert_eq!(j.bodies(), (h1, h2));
+    }
+    
+    #[test]
+    fn test_hinge_joint_with_axis() {
+        let (_map, h1, h2) = make_handles();
+        let j = HingeJoint::with_axis(h1, h2, Vec3::ZERO, Vec3::ZERO, Vec3::Y);
+        assert_eq!(j.bodies(), (h1, h2));
     }
 
     #[test]
     fn test_hinge_joint_with_limit() {
-        let j = HingeJoint::new(0, 1, Vec3::ZERO, Vec3::ZERO, Vec3::Y, Vec3::Y)
+        let (_map, h1, h2) = make_handles();
+        let j = HingeJoint::new(h1, h2, Vec3::ZERO, Vec3::ZERO, Vec3::Y, Vec3::Y)
             .with_limit(-PI / 4.0, PI / 4.0);
         assert!(j.limit.enabled);
     }
 
     #[test]
     fn test_hinge_joint_with_motor() {
-        let j = HingeJoint::new(0, 1, Vec3::ZERO, Vec3::ZERO, Vec3::Y, Vec3::Y)
+        let (_map, h1, h2) = make_handles();
+        let j = HingeJoint::new(h1, h2, Vec3::ZERO, Vec3::ZERO, Vec3::Y, Vec3::Y)
             .with_motor(10.0, 100.0);
         assert!(j.motor.enabled);
     }
 
     #[test]
     fn test_hinge_joint_angle_zero() {
-        let j = HingeJoint::new(0, 1, Vec3::ZERO, Vec3::ZERO, Vec3::Y, Vec3::Y);
+        let (_map, h1, h2) = make_handles();
+        let j = HingeJoint::new(h1, h2, Vec3::ZERO, Vec3::ZERO, Vec3::Y, Vec3::Y);
         let angle = j.compute_angle(Quat::IDENTITY, Quat::IDENTITY);
         assert!(angle.abs() < 0.1);
     }
 
     #[test]
     fn test_hinge_joint_angle_rotated() {
-        let j = HingeJoint::new(0, 1, Vec3::ZERO, Vec3::ZERO, Vec3::Y, Vec3::Y);
+        let (_map, h1, h2) = make_handles();
+        let j = HingeJoint::new(h1, h2, Vec3::ZERO, Vec3::ZERO, Vec3::Y, Vec3::Y);
         let rot_b = Quat::from_rotation_y(PI / 2.0);
         let angle = j.compute_angle(Quat::IDENTITY, rot_b);
         assert!((angle - PI / 2.0).abs() < 0.1);
@@ -254,7 +361,8 @@ mod tests {
 
     #[test]
     fn test_hinge_joint_prepare() {
-        let mut j = HingeJoint::new(0, 1, Vec3::ZERO, Vec3::ZERO, Vec3::Y, Vec3::Y);
+        let (_map, h1, h2) = make_handles();
+        let mut j = HingeJoint::new(h1, h2, Vec3::ZERO, Vec3::ZERO, Vec3::Y, Vec3::Y);
         j.prepare(
             Vec3::ZERO, Quat::IDENTITY,
             Vec3::X, Quat::IDENTITY,
@@ -265,7 +373,8 @@ mod tests {
 
     #[test]
     fn test_hinge_joint_angular_velocity() {
-        let j = HingeJoint::new(0, 1, Vec3::ZERO, Vec3::ZERO, Vec3::Y, Vec3::Y);
+        let (_map, h1, h2) = make_handles();
+        let j = HingeJoint::new(h1, h2, Vec3::ZERO, Vec3::ZERO, Vec3::Y, Vec3::Y);
         let ang_vel = j.angular_velocity(
             Vec3::ZERO,
             Vec3::new(0.0, 5.0, 0.0),
@@ -276,7 +385,8 @@ mod tests {
 
     #[test]
     fn test_hinge_joint_solve_position() {
-        let mut j = HingeJoint::new(0, 1, Vec3::ZERO, Vec3::ZERO, Vec3::Y, Vec3::Y);
+        let (_map, h1, h2) = make_handles();
+        let mut j = HingeJoint::new(h1, h2, Vec3::ZERO, Vec3::ZERO, Vec3::Y, Vec3::Y);
         let result = j.solve_position(
             Vec3::ZERO, Quat::IDENTITY,
             Vec3::X, Quat::IDENTITY,

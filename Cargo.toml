@@ -17,11 +17,12 @@ bytemuck = { version = "1.14", features = ["derive"] }
 
 [dev-dependencies]
 criterion = "0.5"
+proptest = "1.4"
 
 [features]
-default = ["3d"]
-2d = []
-3d = []
+default = ["dim3"]
+dim2 = []
+dim3 = []
 
 [[example]]
 name = "falling_boxes"
@@ -35,7 +36,10 @@ path = "examples/pendulum.rs"
 name = "ragdoll"
 path = "examples/ragdoll.rs"
 
-# Benchmarks will be added later
-# [[bench]]
-# name = "collision"
-# harness = false
+[[bench]]
+name = "collision"
+harness = false
+
+[[bench]]
+name = "dynamics"
+harness = false

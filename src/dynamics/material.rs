@@ -58,6 +58,15 @@ impl Material {
             restitution: 0.3,
         }
     }
+    
+    /// Combine two materials using geometric mean for friction
+    /// and maximum for restitution.
+    pub fn combine(a: &Material, b: &Material) -> Material {
+        Material {
+            friction: combine_friction(a.friction, b.friction),
+            restitution: combine_restitution(a.restitution, b.restitution),
+        }
+    }
 }
 
 /// Combine friction coefficients from two materials.

@@ -163,14 +163,45 @@ fn support(
 
 /// Run EPA to find penetration depth and contact info.
 /// 
-/// Requires a valid tetrahedron simplex from GJK.
+/// Expands the simplex to a tetrahedron if needed.
 pub fn epa(
-    simplex: Simplex,
+    mut simplex: Simplex,
     shape_a: &CollisionShape,
     transform_a: &Transform,
     shape_b: &CollisionShape,
     transform_b: &Transform,
 ) -> Option<PenetrationInfo> {
+    // Expand simplex to tetrahedron if needed
+    while simplex.len() < 4 {
+        // Find a direction not in the current simplex span
+        let dir = match simplex.len() {
+            1 => Vec3::X,
+            2 => {
+                let ab = simplex.get(1) - simplex.get(0);
+                if ab.x.abs() < 0.9 {
+                    ab.cross(Vec3::X).normalize_or_zero()
+                } else {
+                    ab.cross(Vec3::Y).normalize_or_zero()
+                }
+            }
+            3 => {
+                let ab = simplex.get(1) - simplex.get(0);
+                let ac = simplex.get(2) - simplex.get(0);
+                ab.cross(ac).normalize_or_zero()
+            }
+            _ => break,
+        };
+        
+        if dir.length_squared() < 1e-10 {
+            // Degenerate - try opposite direction
+            let new_point = support(shape_a, transform_a, shape_b, transform_b, Vec3::Y);
+            simplex.push(new_point);
+        } else {
+            let new_point = support(shape_a, transform_a, shape_b, transform_b, dir);
+            simplex.push(new_point);
+        }
+    }
+    
     let mut polytope = Polytope::from_simplex(&simplex)?;
 
     const MAX_ITERATIONS: usize = 32;

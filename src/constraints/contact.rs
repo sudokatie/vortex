@@ -1,16 +1,29 @@
-// Contact constraint for collision response
+//! Contact constraint for collision response
 
 use glam::Vec3;
+use slotmap::Key;
 use crate::collision::contact::ContactManifold;
 
-/// Contact constraint for solving collisions
+/// Contact constraint for solving collisions.
+/// Uses body indices for efficient array access in solver.
 #[derive(Debug, Clone)]
 pub struct ContactConstraint {
-    pub body_a: u32,
-    pub body_b: u32,
+    pub body_a: usize,
+    pub body_b: usize,
     pub points: arrayvec::ArrayVec<ContactConstraintPoint, 4>,
     pub friction: f32,
     pub restitution: f32,
+    // Cached primary contact data (for single-point access from solver)
+    /// Primary contact normal
+    pub normal: Vec3,
+    /// Primary contact point r_a
+    pub r_a: Vec3,
+    /// Primary contact point r_b
+    pub r_b: Vec3,
+    /// Primary penetration depth
+    pub penetration: f32,
+    /// Primary normal mass
+    pub normal_mass: f32,
 }
 
 /// Per-point constraint data
@@ -41,11 +54,13 @@ pub struct ContactConstraintPoint {
 }
 
 impl ContactConstraint {
-    /// Create constraint from manifold
-    pub fn from_manifold(
+    /// Create constraint from manifold with handle-to-index mapping.
+    pub fn from_manifold_with_indices(
         manifold: &ContactManifold,
-        pos_a: Vec3,
-        pos_b: Vec3,
+        index_a: usize,
+        index_b: usize,
+        _pos_a: Vec3,
+        _pos_b: Vec3,
         inv_mass_a: f32,
         inv_mass_b: f32,
         inv_inertia_a: Vec3,
@@ -54,11 +69,11 @@ impl ContactConstraint {
         restitution: f32,
     ) -> Self {
         let mut points = arrayvec::ArrayVec::new();
+        let normal = manifold.normal;
         
-        for cp in &manifold.points {
-            let r_a = cp.point_a - pos_a;
-            let r_b = cp.point_b - pos_b;
-            let normal = cp.normal;
+        for cp in &manifold.contacts {
+            let r_a = cp.local_a;
+            let r_b = cp.local_b;
             
             // Build tangent basis
             let (tangent1, tangent2) = build_tangent_basis(normal);
@@ -80,24 +95,62 @@ impl ContactConstraint {
                 normal,
                 tangent1,
                 tangent2,
-                depth: cp.depth,
+                depth: cp.penetration,
                 normal_mass: if normal_mass > 0.0 { 1.0 / normal_mass } else { 0.0 },
                 tangent_mass1: if tangent_mass1 > 0.0 { 1.0 / tangent_mass1 } else { 0.0 },
                 tangent_mass2: if tangent_mass2 > 0.0 { 1.0 / tangent_mass2 } else { 0.0 },
                 normal_impulse: cp.normal_impulse,
-                tangent_impulse1: 0.0,
-                tangent_impulse2: 0.0,
+                tangent_impulse1: cp.tangent_impulse.x,
+                tangent_impulse2: cp.tangent_impulse.y,
                 bias: 0.0,
             });
         }
         
+        // Cache primary contact data for split impulse solver
+        let (prim_normal, prim_r_a, prim_r_b, prim_pen, prim_mass) = if !points.is_empty() {
+            let p = &points[0];
+            (p.normal, p.r_a, p.r_b, p.depth, p.normal_mass)
+        } else {
+            (Vec3::Y, Vec3::ZERO, Vec3::ZERO, 0.0, 0.0)
+        };
+        
         Self {
-            body_a: manifold.body_a,
-            body_b: manifold.body_b,
+            body_a: index_a,
+            body_b: index_b,
             points,
             friction,
             restitution,
+            normal: prim_normal,
+            r_a: prim_r_a,
+            r_b: prim_r_b,
+            penetration: prim_pen,
+            normal_mass: prim_mass,
         }
+    }
+    
+    /// Create constraint from manifold (legacy, uses raw key data as index).
+    pub fn from_manifold(
+        manifold: &ContactManifold,
+        pos_a: Vec3,
+        pos_b: Vec3,
+        inv_mass_a: f32,
+        inv_mass_b: f32,
+        inv_inertia_a: Vec3,
+        inv_inertia_b: Vec3,
+        friction: f32,
+        restitution: f32,
+    ) -> Self {
+        // Use raw slotmap key data as index (version in high bits, idx in low bits)
+        let index_a = manifold.body_a.data().as_ffi() as usize;
+        let index_b = manifold.body_b.data().as_ffi() as usize;
+        
+        Self::from_manifold_with_indices(
+            manifold, index_a, index_b,
+            pos_a, pos_b,
+            inv_mass_a, inv_mass_b,
+            inv_inertia_a, inv_inertia_b,
+            friction, restitution,
+        )
     }
     
     /// Apply warm starting impulses
@@ -220,8 +273,8 @@ impl ContactConstraint {
 /// Result of impulse application
 #[derive(Debug, Clone, Copy)]
 pub struct ImpulseResult {
-    pub body_a: u32,
-    pub body_b: u32,
+    pub body_a: usize,
+    pub body_b: usize,
     pub impulse: Vec3,
     pub r_a: Vec3,
     pub r_b: Vec3,
@@ -268,24 +321,31 @@ fn compute_effective_mass(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collision::contact::{ContactPoint, ContactManifold};
+    use crate::collision::contact::ContactPoint;
+    use crate::world::BodyHandle;
+    use slotmap::SlotMap;
 
-    fn make_manifold() -> ContactManifold {
-        let mut m = ContactManifold::new(0, 1);
+    fn make_manifold() -> (SlotMap<BodyHandle, ()>, ContactManifold) {
+        let mut map = SlotMap::with_key();
+        let h1 = map.insert(());
+        let h2 = map.insert(());
+        
+        let mut m = ContactManifold::new(h1, h2);
+        m.set_normal(Vec3::Y);
         m.add_point(ContactPoint::new(
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(0.0, 0.1, 0.0),
             Vec3::Y,
             0.1,
         ));
-        m
+        (map, m)
     }
 
     #[test]
     fn test_from_manifold() {
-        let m = make_manifold();
-        let c = ContactConstraint::from_manifold(
-            &m, Vec3::ZERO, Vec3::Y,
+        let (_map, m) = make_manifold();
+        let c = ContactConstraint::from_manifold_with_indices(
+            &m, 0, 1, Vec3::ZERO, Vec3::Y,
             1.0, 1.0, Vec3::ONE, Vec3::ONE,
             0.5, 0.3
         );
@@ -296,9 +356,9 @@ mod tests {
 
     #[test]
     fn test_warm_start() {
-        let m = make_manifold();
-        let c = ContactConstraint::from_manifold(
-            &m, Vec3::ZERO, Vec3::Y,
+        let (_map, m) = make_manifold();
+        let c = ContactConstraint::from_manifold_with_indices(
+            &m, 0, 1, Vec3::ZERO, Vec3::Y,
             1.0, 1.0, Vec3::ONE, Vec3::ONE,
             0.5, 0.3
         );
@@ -308,9 +368,9 @@ mod tests {
 
     #[test]
     fn test_solve_velocity() {
-        let m = make_manifold();
-        let mut c = ContactConstraint::from_manifold(
-            &m, Vec3::ZERO, Vec3::Y,
+        let (_map, m) = make_manifold();
+        let mut c = ContactConstraint::from_manifold_with_indices(
+            &m, 0, 1, Vec3::ZERO, Vec3::Y,
             1.0, 1.0, Vec3::ONE, Vec3::ONE,
             0.5, 0.0
         );
@@ -324,9 +384,9 @@ mod tests {
 
     #[test]
     fn test_solve_position() {
-        let m = make_manifold();
-        let c = ContactConstraint::from_manifold(
-            &m, Vec3::ZERO, Vec3::Y,
+        let (_map, m) = make_manifold();
+        let c = ContactConstraint::from_manifold_with_indices(
+            &m, 0, 1, Vec3::ZERO, Vec3::Y,
             1.0, 1.0, Vec3::ONE, Vec3::ONE,
             0.5, 0.3
         );
@@ -344,9 +404,9 @@ mod tests {
 
     #[test]
     fn test_friction_clamping() {
-        let m = make_manifold();
-        let mut c = ContactConstraint::from_manifold(
-            &m, Vec3::ZERO, Vec3::Y,
+        let (_map, m) = make_manifold();
+        let mut c = ContactConstraint::from_manifold_with_indices(
+            &m, 0, 1, Vec3::ZERO, Vec3::Y,
             1.0, 1.0, Vec3::ONE, Vec3::ONE,
             0.5, 0.0
         );
@@ -364,9 +424,9 @@ mod tests {
 
     #[test]
     fn test_restitution_bias() {
-        let m = make_manifold();
-        let mut c = ContactConstraint::from_manifold(
-            &m, Vec3::ZERO, Vec3::Y,
+        let (_map, m) = make_manifold();
+        let mut c = ContactConstraint::from_manifold_with_indices(
+            &m, 0, 1, Vec3::ZERO, Vec3::Y,
             1.0, 1.0, Vec3::ONE, Vec3::ONE,
             0.5, 0.8
         );
