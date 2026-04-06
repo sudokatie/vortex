@@ -54,6 +54,7 @@ pub mod prelude {
         BodyType, Buoyancy, Drag, ForceGenerator, ForceRegistry, Gravity,
         IntegratorType, IntegrationState, IntegrationInput, integrate_state,
         Material, PointForce, RigidBody, Spring,
+        Particle, SoftBody, SoftBodyConfig, SoftSpring,
     };
     pub use crate::math::Transform;
     pub use crate::world::{
