@@ -33,6 +33,8 @@ pub mod constraints;
 pub mod dynamics;
 #[cfg(feature = "dim3")]
 pub mod world;
+#[cfg(feature = "dim3")]
+pub mod fluid;
 
 // 2D physics module (enabled with `dim2` feature)
 #[cfg(feature = "dim2")]
@@ -58,8 +60,12 @@ pub mod prelude {
     };
     pub use crate::math::Transform;
     pub use crate::world::{
-        BodyHandle, Island, IslandDetector, PhysicsStep, PhysicsWorld, 
+        BodyHandle, Island, IslandDetector, PhysicsStep, PhysicsWorld,
         StepConfig, StepResult,
+    };
+    pub use crate::fluid::{
+        Kernels, poly6_value, poly6_value_2d, spiky_gradient, spiky_gradient_2d,
+        viscosity_laplacian, viscosity_laplacian_2d,
     };
 }
 
