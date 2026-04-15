@@ -4,9 +4,11 @@
 //!
 //! - `kernel`: Smoothing kernel functions (Poly6, Spiky, Viscosity)
 //! - `particle`: Fluid particles and spatial hash grid for neighbor queries
+//! - `solver`: SPH solver for fluid dynamics
 
 pub mod kernel;
 pub mod particle;
+pub mod solver;
 
 pub use kernel::{
     Kernels,
@@ -19,3 +21,5 @@ pub use kernel::{
 };
 
 pub use particle::{FluidParticle, ParticleGrid};
+
+pub use solver::{FluidWorld, SPHSolver};
