@@ -64,7 +64,8 @@ pub mod prelude {
         StepConfig, StepResult,
     };
     pub use crate::fluid::{
-        Kernels, poly6_value, poly6_value_2d, spiky_gradient, spiky_gradient_2d,
+        FluidParticle, Kernels, ParticleGrid,
+        poly6_value, poly6_value_2d, spiky_gradient, spiky_gradient_2d,
         viscosity_laplacian, viscosity_laplacian_2d,
     };
 }

@@ -3,8 +3,10 @@
 //! This module provides components for SPH-based fluid simulation:
 //!
 //! - `kernel`: Smoothing kernel functions (Poly6, Spiky, Viscosity)
+//! - `particle`: Fluid particles and spatial hash grid for neighbor queries
 
 pub mod kernel;
+pub mod particle;
 
 pub use kernel::{
     Kernels,
@@ -15,3 +17,5 @@ pub use kernel::{
     viscosity_laplacian,
     viscosity_laplacian_2d,
 };
+
+pub use particle::{FluidParticle, ParticleGrid};
