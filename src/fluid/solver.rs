@@ -8,6 +8,7 @@
 
 use glam::Vec3;
 
+use super::boundary::{BoxBoundary, PlaneBoundary};
 use super::kernel::Kernels;
 use super::particle::{FluidParticle, ParticleGrid};
 
@@ -31,6 +32,10 @@ pub struct SPHSolver {
     pub gas_constant: f64,
     /// Viscosity coefficient
     pub viscosity_coeff: f64,
+    /// Plane boundaries
+    plane_boundaries: Vec<PlaneBoundary>,
+    /// Box boundaries
+    box_boundaries: Vec<BoxBoundary>,
 }
 
 impl SPHSolver {
@@ -50,6 +55,8 @@ impl SPHSolver {
             rest_density: 1000.0,
             gas_constant: 2000.0,
             viscosity_coeff: 200.0,
+            plane_boundaries: Vec::new(),
+            box_boundaries: Vec::new(),
         }
     }
 
@@ -78,6 +85,26 @@ impl SPHSolver {
         self.kernels.h
     }
 
+    /// Add a plane boundary to the simulation.
+    pub fn add_plane_boundary(&mut self, boundary: PlaneBoundary) {
+        self.plane_boundaries.push(boundary);
+    }
+
+    /// Add a box boundary to the simulation.
+    pub fn add_box_boundary(&mut self, boundary: BoxBoundary) {
+        self.box_boundaries.push(boundary);
+    }
+
+    /// Get the plane boundaries.
+    pub fn plane_boundaries(&self) -> &[PlaneBoundary] {
+        &self.plane_boundaries
+    }
+
+    /// Get the box boundaries.
+    pub fn box_boundaries(&self) -> &[BoxBoundary] {
+        &self.box_boundaries
+    }
+
     /// Perform one simulation step with the given time delta.
     ///
     /// The simulation step consists of:
@@ -95,6 +122,7 @@ impl SPHSolver {
         self.compute_density();
         self.compute_pressure();
         self.compute_forces();
+        self.apply_boundary_forces();
         self.integrate(dt);
     }
 
@@ -196,6 +224,26 @@ impl SPHSolver {
             // Total acceleration: (F_pressure + F_viscosity) / rho + gravity
             let acceleration = (pressure_force + viscosity_force) / density_i as f32 + self.gravity;
             self.particles[i].acceleration = acceleration;
+        }
+    }
+
+    /// Apply boundary forces to all particles.
+    fn apply_boundary_forces(&mut self) {
+        for particle in &mut self.particles {
+            let mut boundary_force = Vec3::ZERO;
+
+            // Apply plane boundary forces
+            for plane in &self.plane_boundaries {
+                boundary_force += plane.apply_force(particle);
+            }
+
+            // Apply box boundary forces
+            for bbox in &self.box_boundaries {
+                boundary_force += bbox.apply_force(particle);
+            }
+
+            // Add boundary acceleration (force / mass)
+            particle.acceleration += boundary_force / particle.mass as f32;
         }
     }
 
@@ -546,5 +594,124 @@ mod tests {
             initial_diff,
             final_diff
         );
+    }
+
+    // ==================== Boundary Integration Tests ====================
+
+    #[test]
+    fn solver_add_plane_boundary() {
+        let mut solver = SPHSolver::new(H);
+        assert_eq!(solver.plane_boundaries().len(), 0);
+
+        solver.add_plane_boundary(PlaneBoundary::new(Vec3::Y, Vec3::ZERO));
+        assert_eq!(solver.plane_boundaries().len(), 1);
+
+        solver.add_plane_boundary(PlaneBoundary::new(Vec3::X, Vec3::ZERO));
+        assert_eq!(solver.plane_boundaries().len(), 2);
+    }
+
+    #[test]
+    fn solver_add_box_boundary() {
+        let mut solver = SPHSolver::new(H);
+        assert_eq!(solver.box_boundaries().len(), 0);
+
+        solver.add_box_boundary(BoxBoundary::new(Vec3::splat(-1.0), Vec3::splat(1.0)));
+        assert_eq!(solver.box_boundaries().len(), 1);
+    }
+
+    #[test]
+    fn solver_floor_boundary_prevents_falling() {
+        let mut solver = SPHSolver::new(H);
+        solver.add_plane_boundary(PlaneBoundary::with_params(
+            Vec3::Y,
+            Vec3::ZERO,
+            50000.0,
+            500.0,
+        ));
+
+        // Particle starting just above floor
+        solver.add_particle(FluidParticle::new(Vec3::new(0.0, 0.5, 0.0), 1.0));
+
+        // Run simulation
+        for _ in 0..1000 {
+            solver.step(0.001);
+        }
+
+        // Particle should not fall far below zero
+        let y = solver.particles()[0].position.y;
+        assert!(y > -0.5, "Particle fell through floor: y = {}", y);
+    }
+
+    #[test]
+    fn solver_box_boundary_contains_particles() {
+        let mut solver = SPHSolver::new(H);
+        solver.gravity = Vec3::ZERO;
+        solver.add_box_boundary(BoxBoundary::with_params(
+            Vec3::new(-1.0, -1.0, -1.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            50000.0,
+            500.0,
+        ));
+
+        // Particle with high velocity
+        let mut p = FluidParticle::new(Vec3::ZERO, 1.0);
+        p.velocity = Vec3::new(10.0, 5.0, -8.0);
+        solver.add_particle(p);
+
+        // Run simulation
+        for _ in 0..5000 {
+            solver.step(0.0001);
+        }
+
+        // Particle should stay roughly within bounds
+        let pos = solver.particles()[0].position;
+        assert!(pos.x > -2.0 && pos.x < 2.0, "x out of bounds: {}", pos.x);
+        assert!(pos.y > -2.0 && pos.y < 2.0, "y out of bounds: {}", pos.y);
+        assert!(pos.z > -2.0 && pos.z < 2.0, "z out of bounds: {}", pos.z);
+    }
+
+    #[test]
+    fn solver_multiple_particles_with_boundary() {
+        let mut solver = SPHSolver::new(0.5);
+        solver.add_box_boundary(BoxBoundary::with_params(
+            Vec3::new(-2.0, 0.0, -2.0),
+            Vec3::new(2.0, 4.0, 2.0),
+            20000.0,
+            200.0,
+        ));
+
+        // Create a small grid of particles
+        for x in 0..3 {
+            for y in 0..3 {
+                for z in 0..3 {
+                    solver.add_particle(FluidParticle::new(
+                        Vec3::new(
+                            x as f32 * 0.3 - 0.3,
+                            y as f32 * 0.3 + 2.0,
+                            z as f32 * 0.3 - 0.3,
+                        ),
+                        1.0,
+                    ));
+                }
+            }
+        }
+
+        assert_eq!(solver.particle_count(), 27);
+
+        // Run simulation - particles should settle at the bottom
+        for _ in 0..500 {
+            solver.step(0.001);
+        }
+
+        // All particles should have valid positions
+        for (i, p) in solver.particles().iter().enumerate() {
+            assert!(p.position.is_finite(), "Particle {} has invalid position", i);
+            assert!(
+                p.position.y > -1.0,
+                "Particle {} fell through floor: y = {}",
+                i,
+                p.position.y
+            );
+        }
     }
 }
