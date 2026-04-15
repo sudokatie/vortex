@@ -1,13 +1,19 @@
 # Vortex
 
-Physics engine with rigid body dynamics and collision detection.
+Physics engine with rigid body dynamics, fluid simulation, and collision detection.
 
 ## Features
 
 - **Rigid Body Simulation**: Forces, torques, impulses with semi-implicit Euler integration
-- **Collision Shapes**: Sphere, box, and capsule primitives with GJK/EPA support
+- **Soft Body Dynamics**: Deformable objects using mass-spring systems
+- **SPH Fluid Simulation**: Particle-based fluids with spatial hashing for neighbor queries
+- **Collision Detection**: GJK/EPA for narrow-phase, with SAP, BVH, and spatial hash broad-phase
+- **Collision Shapes**: Sphere, box, and capsule primitives
+- **Contact Solver**: Iterative constraint solver with warm starting
+- **Joints**: Distance, ball, and hinge constraints
+- **Island-based Sleeping**: Automatic deactivation of resting body groups
 - **Material Properties**: Friction and restitution with preset materials
-- **Physics World**: Manage bodies with automatic gravity and stepping
+- **2D Physics**: Optional 2D module via `dim2` feature flag
 
 ## Installation
 
@@ -85,17 +91,70 @@ let ice = Material::ice();        // slippery
 - `BodyType::Kinematic` - Moved by code, affects dynamic bodies
 - `BodyType::Static` - Immovable, infinite mass
 
+## Fluid Simulation
+
+```rust
+use vortex::prelude::*;
+use vortex::fluid::{FluidWorld, FluidParticle, BoxBoundary};
+
+// Create a fluid world with smoothing radius
+let mut fluid = FluidWorld::new(0.5);
+
+// Configure the solver
+fluid.solver_mut().gravity = Vec3::new(0.0, -9.81, 0.0);
+fluid.solver_mut().rest_density = 1000.0;
+fluid.solver_mut().viscosity_coeff = 200.0;
+
+// Add a container boundary
+fluid.solver_mut().add_box_boundary(BoxBoundary::new(
+    Vec3::new(-2.0, 0.0, -2.0),
+    Vec3::new(2.0, 4.0, 2.0),
+));
+
+// Spawn particles in a grid
+for x in 0..10 {
+    for y in 0..10 {
+        for z in 0..10 {
+            let pos = Vec3::new(
+                x as f32 * 0.1 - 0.5,
+                y as f32 * 0.1 + 1.0,
+                z as f32 * 0.1 - 0.5,
+            );
+            fluid.add_particle(FluidParticle::new(pos, 1.0));
+        }
+    }
+}
+
+// Simulate
+for _ in 0..1000 {
+    fluid.step(0.001);
+}
+
+// Access particle positions for rendering
+for particle in fluid.particles() {
+    println!("{:?}", particle.position);
+}
+```
+
 ## Roadmap
 
 - [x] Basic rigid body dynamics
 - [x] Collision shapes (sphere, box, capsule)
 - [x] Physics world stepping
-- [ ] GJK/EPA collision detection
-- [ ] Contact constraint solver
-- [ ] Joints (distance, ball, hinge)
-- [ ] Island-based sleeping
-- [ ] Broad-phase acceleration
+- [x] GJK/EPA collision detection
+- [x] Contact constraint solver
+- [x] Joints (distance, ball, hinge)
+- [x] Island-based sleeping
+- [x] Broad-phase acceleration
+- [ ] Continuous collision detection (CCD)
+- [ ] Convex hull and mesh colliders
+- [ ] Fluid-rigid body coupling
+- [ ] GPU acceleration
 
 ## License
 
 MIT
+
+---
+
+*Katie*
