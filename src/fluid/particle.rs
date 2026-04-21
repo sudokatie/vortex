@@ -113,14 +113,14 @@ impl ParticleGrid {
     /// Insert a particle index at the given position.
     pub fn insert(&mut self, index: usize, position: Vec3) {
         let cell = self.cell_coord(position);
-        self.grid.entry(cell).or_insert_with(Vec::new).push(index);
+        self.grid.entry(cell).or_default().push(index);
     }
 
     /// Query all particle indices within the given radius of a position.
     ///
     /// Checks the 27 surrounding cells (3x3x3) centered on the query position's cell.
     /// Returns indices of all particles in those cells that are within `radius` distance.
-    pub fn query(&self, position: Vec3, radius: f64) -> Vec<usize> {
+    pub fn query(&self, position: Vec3, _radius: f64) -> Vec<usize> {
         let (cx, cy, cz) = self.cell_coord(position);
         let mut result = Vec::new();
 

@@ -8,6 +8,7 @@ Physics engine with rigid body dynamics, fluid simulation, and collision detecti
 - **Soft Body Dynamics**: Deformable objects using mass-spring systems
 - **SPH Fluid Simulation**: Particle-based fluids with spatial hashing for neighbor queries
 - **Collision Detection**: GJK/EPA for narrow-phase, with SAP, BVH, and spatial hash broad-phase
+- **Continuous Collision Detection**: Sweep tests and time-of-impact calculations for fast-moving objects
 - **Collision Shapes**: Sphere, box, and capsule primitives
 - **Contact Solver**: Iterative constraint solver with warm starting
 - **Joints**: Distance, ball, and hinge constraints
@@ -146,7 +147,7 @@ for particle in fluid.particles() {
 - [x] Joints (distance, ball, hinge)
 - [x] Island-based sleeping
 - [x] Broad-phase acceleration
-- [ ] Continuous collision detection (CCD)
+- [x] Continuous collision detection (CCD)
 - [ ] Convex hull and mesh colliders
 - [ ] Fluid-rigid body coupling
 - [ ] GPU acceleration

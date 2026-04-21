@@ -5,8 +5,8 @@ use slotmap::{new_key_type, SlotMap, Key};
 use std::collections::HashMap;
 
 use crate::collision::{
-    Aabb, BroadPhase, ContactManifold, SweepAndPrune,
-    gjk_intersection, epa, generate_contacts,
+    Aabb, BroadPhase, ContactManifold, SweepAndPrune, TimeOfImpact,
+    gjk_intersection, epa, generate_contacts, calculate_toi, needs_ccd,
 };
 use crate::constraints::{
     ContactConstraint, ConstraintSolver, Joint, SolverBody, SolverConfig,
@@ -159,6 +159,16 @@ impl PhysicsWorld {
         self.solver.set_position_iterations(position);
     }
 
+    /// Enable or disable continuous collision detection.
+    pub fn set_ccd_enabled(&mut self, enabled: bool) {
+        self.config.ccd_enabled = enabled;
+    }
+
+    /// Check if CCD is enabled.
+    pub fn ccd_enabled(&self) -> bool {
+        self.config.ccd_enabled
+    }
+
     /// Step the simulation forward by dt seconds.
     pub fn step(&mut self, dt: f32) {
         let _result = self.step_full(dt);
@@ -168,16 +178,28 @@ impl PhysicsWorld {
     pub fn step_full(&mut self, dt: f32) -> StepResult {
         let mut result = StepResult::new();
         result.substeps = 1;
-        
+
+        // CCD: If enabled, check for fast-moving bodies and handle sub-stepping
+        if self.config.ccd_enabled {
+            self.step_with_ccd(dt, &mut result);
+        } else {
+            self.step_discrete(dt, &mut result);
+        }
+
+        result
+    }
+
+    /// Perform a discrete physics step (no CCD).
+    fn step_discrete(&mut self, dt: f32, result: &mut StepResult) {
         // 1. Apply forces (gravity, etc.)
         self.apply_forces(dt);
-        
+
         // 2. Update broadphase AABBs
         self.update_broadphase();
-        
+
         // 3. Broad phase collision detection
         let pairs = self.broadphase.query_pairs();
-        
+
         // 4. Narrow phase collision detection (GJK/EPA)
         self.contact_manifolds.clear();
         for (handle_a, handle_b) in &pairs {
@@ -186,23 +208,237 @@ impl PhysicsWorld {
             }
         }
         result.contact_count = self.contact_manifolds.len();
-        
+
         // 5. Build islands for optimized solving and sleeping
         let islands = self.build_islands();
         result.island_count = islands.len();
-        
+
         // 6. Solve constraints per island (allows parallel solving, better sleeping)
         self.solve_constraints_with_islands(&islands, dt);
-        
+
         // 7. Integrate velocities and positions
         self.integrate(dt);
-        
+
         // 8. Update sleeping (per-island)
         if self.config.allow_sleeping {
-            self.update_sleeping_with_islands(&islands, dt, &mut result);
+            self.update_sleeping_with_islands(&islands, dt, result);
         }
-        
-        result
+    }
+
+    /// Perform a physics step with CCD sub-stepping.
+    fn step_with_ccd(&mut self, dt: f32, result: &mut StepResult) {
+        let mut remaining_time = dt;
+        let mut ccd_substeps = 0;
+        let max_ccd_substeps = self.config.max_ccd_substeps;
+
+        while remaining_time > 1e-6 && ccd_substeps < max_ccd_substeps {
+            // Find bodies that need CCD
+            let fast_bodies = self.find_ccd_bodies(remaining_time);
+
+            if fast_bodies.is_empty() {
+                // No fast bodies, do regular step for remaining time
+                self.step_discrete(remaining_time, result);
+                break;
+            }
+
+            // Run sweep tests for fast-moving body pairs
+            let toi_result = self.find_earliest_toi(&fast_bodies, remaining_time);
+            result.ccd_sweep_tests += fast_bodies.len();
+
+            match toi_result {
+                Some(toi) if toi.time < 1.0 => {
+                    // Collision detected before end of frame
+                    let sub_dt = remaining_time * toi.time;
+
+                    if sub_dt > 1e-6 {
+                        // Advance to time of impact
+                        self.integrate_to_time(sub_dt);
+                    }
+
+                    // Resolve collision at TOI
+                    self.resolve_ccd_collision(&toi);
+
+                    // Continue with remaining time
+                    remaining_time *= 1.0 - toi.time;
+                    ccd_substeps += 1;
+                }
+                _ => {
+                    // No collision, do regular step
+                    self.step_discrete(remaining_time, result);
+                    break;
+                }
+            }
+        }
+
+        result.ccd_substeps = ccd_substeps;
+    }
+
+    /// Find bodies that need CCD due to high velocity.
+    fn find_ccd_bodies(&self, dt: f32) -> Vec<BodyHandle> {
+        let mut fast_bodies = Vec::new();
+
+        for (handle, body) in self.bodies.iter() {
+            if !body.is_dynamic() || body.is_sleeping {
+                continue;
+            }
+
+            if needs_ccd(&body.shape, body.linear_velocity, dt) {
+                fast_bodies.push(handle);
+            }
+        }
+
+        fast_bodies
+    }
+
+    /// Find the earliest time of impact among fast-moving body pairs.
+    fn find_earliest_toi(&self, fast_bodies: &[BodyHandle], dt: f32) -> Option<TimeOfImpact> {
+        let mut earliest_toi: Option<TimeOfImpact> = None;
+
+        for &handle_a in fast_bodies {
+            let body_a = match self.bodies.get(handle_a) {
+                Some(b) => b,
+                None => continue,
+            };
+
+            // Check against all other bodies
+            for (handle_b, body_b) in self.bodies.iter() {
+                if handle_a == handle_b {
+                    continue;
+                }
+
+                // Skip if both static/kinematic
+                if !body_a.is_dynamic() && !body_b.is_dynamic() {
+                    continue;
+                }
+
+                // Skip if both sleeping
+                if body_a.is_sleeping && body_b.is_sleeping {
+                    continue;
+                }
+
+                // Calculate TOI
+                if let Some(toi) = calculate_toi(
+                    handle_a,
+                    &body_a.shape,
+                    body_a.position,
+                    body_a.linear_velocity,
+                    body_a.rotation,
+                    handle_b,
+                    &body_b.shape,
+                    body_b.position,
+                    body_b.linear_velocity,
+                    body_b.rotation,
+                    dt,
+                ) {
+                    match &earliest_toi {
+                        None => earliest_toi = Some(toi),
+                        Some(existing) if toi.time < existing.time => earliest_toi = Some(toi),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        earliest_toi
+    }
+
+    /// Integrate bodies forward by a given time without collision resolution.
+    fn integrate_to_time(&mut self, dt: f32) {
+        for (_, body) in self.bodies.iter_mut() {
+            if !body.is_dynamic() || body.is_sleeping {
+                continue;
+            }
+
+            // Just integrate position, don't apply forces (already done)
+            body.position += body.linear_velocity * dt;
+
+            // Integrate rotation
+            let omega = body.angular_velocity;
+            let dq = glam::Quat::from_xyzw(
+                omega.x * 0.5 * dt,
+                omega.y * 0.5 * dt,
+                omega.z * 0.5 * dt,
+                0.0,
+            ) * body.rotation;
+            body.rotation = (body.rotation + dq).normalize();
+        }
+    }
+
+    /// Resolve a collision detected by CCD.
+    fn resolve_ccd_collision(&mut self, toi: &TimeOfImpact) {
+        // Get both bodies
+        let (inv_mass_a, vel_a, is_dynamic_a, inv_mass_b, vel_b, is_dynamic_b, friction, restitution) = {
+            let body_a = match self.bodies.get(toi.shape_a) {
+                Some(b) => b,
+                None => return,
+            };
+            let body_b = match self.bodies.get(toi.shape_b) {
+                Some(b) => b,
+                None => return,
+            };
+
+            let friction = combine_friction(body_a.friction, body_b.friction);
+            let restitution = combine_restitution(body_a.restitution, body_b.restitution);
+
+            (
+                body_a.inv_mass,
+                body_a.linear_velocity,
+                body_a.is_dynamic(),
+                body_b.inv_mass,
+                body_b.linear_velocity,
+                body_b.is_dynamic(),
+                friction,
+                restitution,
+            )
+        };
+
+        // Calculate relative velocity along collision normal
+        let rel_vel = vel_b - vel_a;
+        let vel_along_normal = rel_vel.dot(toi.normal);
+
+        // Don't resolve if velocities are separating
+        if vel_along_normal > 0.0 {
+            return;
+        }
+
+        // Calculate impulse magnitude
+        let total_inv_mass = inv_mass_a + inv_mass_b;
+        if total_inv_mass <= 0.0 {
+            return;
+        }
+
+        let j = -(1.0 + restitution) * vel_along_normal / total_inv_mass;
+        let impulse = toi.normal * j;
+
+        // Apply impulse
+        if let Some(body_a) = self.bodies.get_mut(toi.shape_a) {
+            if is_dynamic_a {
+                body_a.linear_velocity -= impulse * inv_mass_a;
+            }
+        }
+        if let Some(body_b) = self.bodies.get_mut(toi.shape_b) {
+            if is_dynamic_b {
+                body_b.linear_velocity += impulse * inv_mass_b;
+            }
+        }
+
+        // Apply friction impulse
+        let tangent = (rel_vel - toi.normal * vel_along_normal).normalize_or_zero();
+        let vel_along_tangent = rel_vel.dot(tangent);
+        let jt = -vel_along_tangent / total_inv_mass;
+        let jt_clamped = jt.clamp(-j.abs() * friction, j.abs() * friction);
+        let friction_impulse = tangent * jt_clamped;
+
+        if let Some(body_a) = self.bodies.get_mut(toi.shape_a) {
+            if body_a.is_dynamic() {
+                body_a.linear_velocity -= friction_impulse * inv_mass_a;
+            }
+        }
+        if let Some(body_b) = self.bodies.get_mut(toi.shape_b) {
+            if body_b.is_dynamic() {
+                body_b.linear_velocity += friction_impulse * inv_mass_b;
+            }
+        }
     }
     
     /// Apply forces (gravity) to all dynamic bodies.

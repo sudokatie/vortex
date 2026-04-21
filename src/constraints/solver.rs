@@ -151,10 +151,10 @@ impl ConstraintSolver {
             for contact in contacts.iter() {
                 let impulses = contact.warm_start();
                 for imp in impulses {
-                    let body_a = &mut bodies[imp.body_a as usize];
+                    let body_a = &mut bodies[imp.body_a];
                     body_a.apply_impulse(-imp.impulse, imp.r_a);
                     
-                    let body_b = &mut bodies[imp.body_b as usize];
+                    let body_b = &mut bodies[imp.body_b];
                     body_b.apply_impulse(imp.impulse, imp.r_b);
                 }
             }
@@ -163,8 +163,8 @@ impl ConstraintSolver {
         // Velocity iterations
         for _ in 0..self.config.velocity_iterations {
             for contact in contacts.iter_mut() {
-                let body_a = bodies[contact.body_a as usize];
-                let body_b = bodies[contact.body_b as usize];
+                let body_a = bodies[contact.body_a];
+                let body_b = bodies[contact.body_b];
                 
                 let impulses = contact.solve_velocity(
                     body_a.velocity,
@@ -174,10 +174,10 @@ impl ConstraintSolver {
                 );
                 
                 for imp in impulses {
-                    let body_a = &mut bodies[imp.body_a as usize];
+                    let body_a = &mut bodies[imp.body_a];
                     body_a.apply_impulse(-imp.impulse, imp.r_a);
                     
-                    let body_b = &mut bodies[imp.body_b as usize];
+                    let body_b = &mut bodies[imp.body_b];
                     body_b.apply_impulse(imp.impulse, imp.r_b);
                 }
             }
@@ -189,8 +189,8 @@ impl ConstraintSolver {
                 // Position iterations using direct correction
                 for _ in 0..self.config.position_iterations {
                     for contact in contacts.iter() {
-                        let body_a = bodies[contact.body_a as usize];
-                        let body_b = bodies[contact.body_b as usize];
+                        let body_a = bodies[contact.body_a];
+                        let body_b = bodies[contact.body_b];
                         
                         let correction = contact.solve_position(
                             body_a.position,
@@ -199,8 +199,8 @@ impl ConstraintSolver {
                             body_b.inv_mass,
                         );
                         
-                        bodies[contact.body_a as usize].position += correction.correction_a;
-                        bodies[contact.body_b as usize].position += correction.correction_b;
+                        bodies[contact.body_a].position += correction.correction_a;
+                        bodies[contact.body_b].position += correction.correction_b;
                     }
                 }
             }
@@ -214,8 +214,8 @@ impl ConstraintSolver {
                 // Solve position with pseudo-impulses
                 for _ in 0..self.config.position_iterations {
                     for contact in contacts.iter() {
-                        let body_a = bodies[contact.body_a as usize];
-                        let body_b = bodies[contact.body_b as usize];
+                        let body_a = bodies[contact.body_a];
+                        let body_b = bodies[contact.body_b];
                         
                         // Compute position error
                         let penetration = contact.penetration;
@@ -251,8 +251,8 @@ impl ConstraintSolver {
                         let impulse = normal * impulse_mag;
                         
                         // Apply to pseudo-velocities
-                        bodies[contact.body_a as usize].apply_pseudo_impulse(-impulse, r_a);
-                        bodies[contact.body_b as usize].apply_pseudo_impulse(impulse, r_b);
+                        bodies[contact.body_a].apply_pseudo_impulse(-impulse, r_a);
+                        bodies[contact.body_b].apply_pseudo_impulse(impulse, r_b);
                     }
                 }
             }
@@ -260,8 +260,8 @@ impl ConstraintSolver {
                 // Non-linear Gauss-Seidel: directly solve position constraints
                 for _ in 0..self.config.position_iterations {
                     for contact in contacts.iter() {
-                        let body_a = &bodies[contact.body_a as usize];
-                        let body_b = &bodies[contact.body_b as usize];
+                        let body_a = &bodies[contact.body_a];
+                        let body_b = &bodies[contact.body_b];
                         
                         // Recompute penetration with current positions
                         let world_a = body_a.position + contact.r_a;
@@ -283,8 +283,8 @@ impl ConstraintSolver {
                         let correction_a = contact.normal * (-correction * body_a.inv_mass);
                         let correction_b = contact.normal * (correction * body_b.inv_mass);
                         
-                        bodies[contact.body_a as usize].position += correction_a;
-                        bodies[contact.body_b as usize].position += correction_b;
+                        bodies[contact.body_a].position += correction_a;
+                        bodies[contact.body_b].position += correction_b;
                     }
                 }
             }

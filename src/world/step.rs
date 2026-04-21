@@ -21,6 +21,10 @@ pub struct StepConfig {
     pub sleep_threshold: f32,
     /// Time to sleep after being still
     pub time_to_sleep: f32,
+    /// Enable continuous collision detection for fast-moving bodies
+    pub ccd_enabled: bool,
+    /// Maximum CCD sub-steps per frame to prevent infinite loops
+    pub max_ccd_substeps: usize,
 }
 
 impl Default for StepConfig {
@@ -34,6 +38,8 @@ impl Default for StepConfig {
             allow_sleeping: true,
             sleep_threshold: 0.05,
             time_to_sleep: 0.5,
+            ccd_enabled: true,
+            max_ccd_substeps: 4,
         }
     }
 }
@@ -54,6 +60,18 @@ impl StepConfig {
     pub fn with_iterations(mut self, velocity: usize, position: usize) -> Self {
         self.velocity_iterations = velocity;
         self.position_iterations = position;
+        self
+    }
+
+    /// Enable or disable CCD.
+    pub fn with_ccd(mut self, enabled: bool) -> Self {
+        self.ccd_enabled = enabled;
+        self
+    }
+
+    /// Set maximum CCD substeps.
+    pub fn with_max_ccd_substeps(mut self, max_substeps: usize) -> Self {
+        self.max_ccd_substeps = max_substeps;
         self
     }
 }
@@ -83,6 +101,10 @@ pub struct StepResult {
     pub newly_sleeping: Vec<u32>,
     /// Bodies that woke up
     pub newly_awake: Vec<u32>,
+    /// Number of CCD substeps taken
+    pub ccd_substeps: usize,
+    /// Number of CCD sweep tests performed
+    pub ccd_sweep_tests: usize,
 }
 
 impl StepResult {
@@ -94,6 +116,8 @@ impl StepResult {
             timing: StepTiming::default(),
             newly_sleeping: Vec::new(),
             newly_awake: Vec::new(),
+            ccd_substeps: 0,
+            ccd_sweep_tests: 0,
         }
     }
 }
@@ -336,7 +360,7 @@ mod tests {
         let torques = vec![Vec3::ZERO];
         let inv_masses = vec![0.0]; // Static
         let inv_inertias = vec![Vec3::ZERO];
-        
+
         integrate_velocities(
             &mut velocities,
             &mut angular_velocities,
@@ -347,7 +371,26 @@ mod tests {
             Vec3::new(0.0, -10.0, 0.0),
             1.0,
         );
-        
+
         assert_eq!(velocities[0], Vec3::ZERO);
+    }
+
+    #[test]
+    fn test_step_config_ccd_default() {
+        let config = StepConfig::default();
+        assert!(config.ccd_enabled);
+        assert_eq!(config.max_ccd_substeps, 4);
+    }
+
+    #[test]
+    fn test_step_config_with_ccd() {
+        let config = StepConfig::default().with_ccd(false);
+        assert!(!config.ccd_enabled);
+    }
+
+    #[test]
+    fn test_step_config_with_max_ccd_substeps() {
+        let config = StepConfig::default().with_max_ccd_substeps(8);
+        assert_eq!(config.max_ccd_substeps, 8);
     }
 }
