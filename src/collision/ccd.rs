@@ -101,6 +101,23 @@ fn shape_ccd_threshold(shape: &CollisionShape) -> f32 {
                 extents.x.min(extents.y).min(extents.z)
             }
         }
+        CollisionShape::Mesh { triangles } => {
+            if triangles.is_empty() {
+                0.5
+            } else {
+                // Use smallest extent of AABB as threshold
+                let mut min = triangles[0].vertices[0];
+                let mut max = triangles[0].vertices[0];
+                for tri in triangles {
+                    for &v in &tri.vertices {
+                        min = min.min(v);
+                        max = max.max(v);
+                    }
+                }
+                let extents = (max - min) * 0.5;
+                extents.x.min(extents.y).min(extents.z).max(0.01)
+            }
+        }
     }
 }
 
@@ -466,6 +483,143 @@ pub fn sweep_capsule_capsule(
     )
 }
 
+/// Perform sweep test for a convex hull against a sphere.
+pub fn sweep_convex_sphere(
+    convex: &CollisionShape,
+    convex_pos_start: Vec3,
+    convex_pos_end: Vec3,
+    convex_rot: Quat,
+    sphere_pos_start: Vec3,
+    sphere_pos_end: Vec3,
+    sphere_radius: f32,
+) -> Option<SweepResult> {
+    let sphere = CollisionShape::Sphere { radius: sphere_radius };
+
+    sweep_test(
+        convex, convex_pos_start, convex_pos_end, convex_rot,
+        &sphere, sphere_pos_start, sphere_pos_end, Quat::IDENTITY,
+    )
+}
+
+/// Perform sweep test for a convex hull against a box.
+pub fn sweep_convex_box(
+    convex: &CollisionShape,
+    convex_pos_start: Vec3,
+    convex_pos_end: Vec3,
+    convex_rot: Quat,
+    box_pos_start: Vec3,
+    box_pos_end: Vec3,
+    box_half_extents: Vec3,
+    box_rot: Quat,
+) -> Option<SweepResult> {
+    let box_shape = CollisionShape::Box { half_extents: box_half_extents };
+
+    sweep_test(
+        convex, convex_pos_start, convex_pos_end, convex_rot,
+        &box_shape, box_pos_start, box_pos_end, box_rot,
+    )
+}
+
+/// Perform sweep test for a convex hull against a capsule.
+pub fn sweep_convex_capsule(
+    convex: &CollisionShape,
+    convex_pos_start: Vec3,
+    convex_pos_end: Vec3,
+    convex_rot: Quat,
+    capsule_pos_start: Vec3,
+    capsule_pos_end: Vec3,
+    capsule_radius: f32,
+    capsule_half_height: f32,
+    capsule_rot: Quat,
+) -> Option<SweepResult> {
+    let capsule = CollisionShape::Capsule {
+        radius: capsule_radius,
+        half_height: capsule_half_height,
+    };
+
+    sweep_test(
+        convex, convex_pos_start, convex_pos_end, convex_rot,
+        &capsule, capsule_pos_start, capsule_pos_end, capsule_rot,
+    )
+}
+
+/// Perform sweep test for two convex hulls.
+pub fn sweep_convex_convex(
+    convex_a: &CollisionShape,
+    convex_a_pos_start: Vec3,
+    convex_a_pos_end: Vec3,
+    convex_a_rot: Quat,
+    convex_b: &CollisionShape,
+    convex_b_pos_start: Vec3,
+    convex_b_pos_end: Vec3,
+    convex_b_rot: Quat,
+) -> Option<SweepResult> {
+    sweep_test(
+        convex_a, convex_a_pos_start, convex_a_pos_end, convex_a_rot,
+        convex_b, convex_b_pos_start, convex_b_pos_end, convex_b_rot,
+    )
+}
+
+/// Perform sweep test for a mesh against a sphere.
+pub fn sweep_mesh_sphere(
+    mesh: &CollisionShape,
+    mesh_pos_start: Vec3,
+    mesh_pos_end: Vec3,
+    mesh_rot: Quat,
+    sphere_pos_start: Vec3,
+    sphere_pos_end: Vec3,
+    sphere_radius: f32,
+) -> Option<SweepResult> {
+    let sphere = CollisionShape::Sphere { radius: sphere_radius };
+
+    sweep_test(
+        mesh, mesh_pos_start, mesh_pos_end, mesh_rot,
+        &sphere, sphere_pos_start, sphere_pos_end, Quat::IDENTITY,
+    )
+}
+
+/// Perform sweep test for a mesh against a box.
+pub fn sweep_mesh_box(
+    mesh: &CollisionShape,
+    mesh_pos_start: Vec3,
+    mesh_pos_end: Vec3,
+    mesh_rot: Quat,
+    box_pos_start: Vec3,
+    box_pos_end: Vec3,
+    box_half_extents: Vec3,
+    box_rot: Quat,
+) -> Option<SweepResult> {
+    let box_shape = CollisionShape::Box { half_extents: box_half_extents };
+
+    sweep_test(
+        mesh, mesh_pos_start, mesh_pos_end, mesh_rot,
+        &box_shape, box_pos_start, box_pos_end, box_rot,
+    )
+}
+
+/// Perform sweep test for a mesh against a capsule.
+pub fn sweep_mesh_capsule(
+    mesh: &CollisionShape,
+    mesh_pos_start: Vec3,
+    mesh_pos_end: Vec3,
+    mesh_rot: Quat,
+    capsule_pos_start: Vec3,
+    capsule_pos_end: Vec3,
+    capsule_radius: f32,
+    capsule_half_height: f32,
+    capsule_rot: Quat,
+) -> Option<SweepResult> {
+    let capsule = CollisionShape::Capsule {
+        radius: capsule_radius,
+        half_height: capsule_half_height,
+    };
+
+    sweep_test(
+        mesh, mesh_pos_start, mesh_pos_end, mesh_rot,
+        &capsule, capsule_pos_start, capsule_pos_end, capsule_rot,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,5 +818,297 @@ mod tests {
         assert!(result.is_some());
         let r = result.unwrap();
         assert!(r.time >= 0.0 && r.time <= 1.0);
+    }
+
+    #[test]
+    fn test_convex_sphere_sweep() {
+        // Create a tetrahedron convex hull
+        let vertices = vec![
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-1.0, -0.5, -0.5),
+            Vec3::new(1.0, -0.5, -0.5),
+            Vec3::new(0.0, -0.5, 1.0),
+        ];
+        let convex = CollisionShape::convex_hull(vertices);
+
+        // Convex moves from -5 to 5, sphere at x=3
+        let result = sweep_convex_sphere(
+            &convex,
+            Vec3::new(-5.0, 0.0, 0.0),
+            Vec3::new(5.0, 0.0, 0.0),
+            Quat::IDENTITY,
+            Vec3::new(3.0, 0.0, 0.0),
+            Vec3::new(3.0, 0.0, 0.0),
+            0.5,
+        );
+
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.time >= 0.0 && r.time <= 1.0);
+    }
+
+    #[test]
+    fn test_convex_box_sweep() {
+        // Create a tetrahedron convex hull
+        let vertices = vec![
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-1.0, -0.5, -0.5),
+            Vec3::new(1.0, -0.5, -0.5),
+            Vec3::new(0.0, -0.5, 1.0),
+        ];
+        let convex = CollisionShape::convex_hull(vertices);
+
+        // Convex moves toward box
+        let result = sweep_convex_box(
+            &convex,
+            Vec3::new(-5.0, 0.0, 0.0),
+            Vec3::new(5.0, 0.0, 0.0),
+            Quat::IDENTITY,
+            Vec3::new(3.0, 0.0, 0.0),
+            Vec3::new(3.0, 0.0, 0.0),
+            Vec3::new(0.5, 0.5, 0.5),
+            Quat::IDENTITY,
+        );
+
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.time >= 0.0 && r.time <= 1.0);
+    }
+
+    #[test]
+    fn test_convex_capsule_sweep() {
+        // Create a tetrahedron convex hull
+        let vertices = vec![
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-1.0, -0.5, -0.5),
+            Vec3::new(1.0, -0.5, -0.5),
+            Vec3::new(0.0, -0.5, 1.0),
+        ];
+        let convex = CollisionShape::convex_hull(vertices);
+
+        // Convex moves toward capsule
+        let result = sweep_convex_capsule(
+            &convex,
+            Vec3::new(-5.0, 0.0, 0.0),
+            Vec3::new(5.0, 0.0, 0.0),
+            Quat::IDENTITY,
+            Vec3::new(3.0, 0.0, 0.0),
+            Vec3::new(3.0, 0.0, 0.0),
+            0.5,
+            1.0,
+            Quat::IDENTITY,
+        );
+
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.time >= 0.0 && r.time <= 1.0);
+    }
+
+    #[test]
+    fn test_convex_convex_sweep() {
+        // Two tetrahedra
+        let vertices = vec![
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-1.0, -0.5, -0.5),
+            Vec3::new(1.0, -0.5, -0.5),
+            Vec3::new(0.0, -0.5, 1.0),
+        ];
+        let convex_a = CollisionShape::convex_hull(vertices.clone());
+        let convex_b = CollisionShape::convex_hull(vertices);
+
+        let result = sweep_convex_convex(
+            &convex_a,
+            Vec3::new(-5.0, 0.0, 0.0),
+            Vec3::new(5.0, 0.0, 0.0),
+            Quat::IDENTITY,
+            &convex_b,
+            Vec3::new(3.0, 0.0, 0.0),
+            Vec3::new(3.0, 0.0, 0.0),
+            Quat::IDENTITY,
+        );
+
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.time >= 0.0 && r.time <= 1.0);
+    }
+
+    #[test]
+    fn test_convex_sweep_miss() {
+        // Convex hull that doesn't reach the sphere
+        let vertices = vec![
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-1.0, -0.5, -0.5),
+            Vec3::new(1.0, -0.5, -0.5),
+            Vec3::new(0.0, -0.5, 1.0),
+        ];
+        let convex = CollisionShape::convex_hull(vertices);
+
+        let result = sweep_convex_sphere(
+            &convex,
+            Vec3::new(-5.0, 0.0, 0.0),
+            Vec3::new(-3.0, 0.0, 0.0), // Doesn't reach sphere
+            Quat::IDENTITY,
+            Vec3::new(5.0, 0.0, 0.0), // Sphere far away
+            Vec3::new(5.0, 0.0, 0.0),
+            0.5,
+        );
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_needs_ccd_convex() {
+        let vertices = vec![
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-1.0, -0.5, -0.5),
+            Vec3::new(1.0, -0.5, -0.5),
+            Vec3::new(0.0, -0.5, 1.0),
+        ];
+        let convex = CollisionShape::convex_hull(vertices);
+
+        // Fast velocity should need CCD
+        let fast_velocity = Vec3::new(100.0, 0.0, 0.0);
+        assert!(needs_ccd(&convex, fast_velocity, 1.0 / 60.0));
+
+        // Slow velocity should not need CCD
+        let slow_velocity = Vec3::new(0.1, 0.0, 0.0);
+        assert!(!needs_ccd(&convex, slow_velocity, 1.0 / 60.0));
+    }
+
+    // Mesh collider sweep tests
+
+    #[test]
+    fn test_mesh_sphere_sweep() {
+        use crate::collision::Triangle;
+
+        let triangles = vec![
+            Triangle::new(
+                Vec3::new(-1.0, -1.0, 0.0),
+                Vec3::new(1.0, -1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ),
+        ];
+        let mesh = CollisionShape::mesh(triangles);
+
+        let result = sweep_mesh_sphere(
+            &mesh,
+            Vec3::new(-5.0, 0.0, 0.0),
+            Vec3::new(5.0, 0.0, 0.0),
+            Quat::IDENTITY,
+            Vec3::new(3.0, 0.0, 0.0),
+            Vec3::new(3.0, 0.0, 0.0),
+            0.5,
+        );
+
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.time >= 0.0 && r.time <= 1.0);
+    }
+
+    #[test]
+    fn test_mesh_box_sweep() {
+        use crate::collision::Triangle;
+
+        let triangles = vec![
+            Triangle::new(
+                Vec3::new(-1.0, -1.0, 0.0),
+                Vec3::new(1.0, -1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ),
+        ];
+        let mesh = CollisionShape::mesh(triangles);
+
+        let result = sweep_mesh_box(
+            &mesh,
+            Vec3::new(-5.0, 0.0, 0.0),
+            Vec3::new(5.0, 0.0, 0.0),
+            Quat::IDENTITY,
+            Vec3::new(3.0, 0.0, 0.0),
+            Vec3::new(3.0, 0.0, 0.0),
+            Vec3::new(0.5, 0.5, 0.5),
+            Quat::IDENTITY,
+        );
+
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.time >= 0.0 && r.time <= 1.0);
+    }
+
+    #[test]
+    fn test_mesh_capsule_sweep() {
+        use crate::collision::Triangle;
+
+        let triangles = vec![
+            Triangle::new(
+                Vec3::new(-1.0, -1.0, 0.0),
+                Vec3::new(1.0, -1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ),
+        ];
+        let mesh = CollisionShape::mesh(triangles);
+
+        let result = sweep_mesh_capsule(
+            &mesh,
+            Vec3::new(-5.0, 0.0, 0.0),
+            Vec3::new(5.0, 0.0, 0.0),
+            Quat::IDENTITY,
+            Vec3::new(3.0, 0.0, 0.0),
+            Vec3::new(3.0, 0.0, 0.0),
+            0.5,
+            1.0,
+            Quat::IDENTITY,
+        );
+
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.time >= 0.0 && r.time <= 1.0);
+    }
+
+    #[test]
+    fn test_mesh_sweep_miss() {
+        use crate::collision::Triangle;
+
+        let triangles = vec![
+            Triangle::new(
+                Vec3::new(-1.0, -1.0, 0.0),
+                Vec3::new(1.0, -1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ),
+        ];
+        let mesh = CollisionShape::mesh(triangles);
+
+        let result = sweep_mesh_sphere(
+            &mesh,
+            Vec3::new(-5.0, 0.0, 0.0),
+            Vec3::new(-3.0, 0.0, 0.0), // Doesn't reach
+            Quat::IDENTITY,
+            Vec3::new(5.0, 0.0, 0.0),
+            Vec3::new(5.0, 0.0, 0.0),
+            0.5,
+        );
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_needs_ccd_mesh() {
+        use crate::collision::Triangle;
+
+        let triangles = vec![
+            Triangle::new(
+                Vec3::new(-1.0, -1.0, 0.0),
+                Vec3::new(1.0, -1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ),
+        ];
+        let mesh = CollisionShape::mesh(triangles);
+
+        // Fast velocity should need CCD
+        let fast_velocity = Vec3::new(100.0, 0.0, 0.0);
+        assert!(needs_ccd(&mesh, fast_velocity, 1.0 / 60.0));
+
+        // Slow velocity should not need CCD
+        let slow_velocity = Vec3::new(0.001, 0.0, 0.0);
+        assert!(!needs_ccd(&mesh, slow_velocity, 1.0 / 60.0));
     }
 }

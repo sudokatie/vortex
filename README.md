@@ -9,7 +9,7 @@ Physics engine with rigid body dynamics, fluid simulation, and collision detecti
 - **SPH Fluid Simulation**: Particle-based fluids with spatial hashing for neighbor queries
 - **Collision Detection**: GJK/EPA for narrow-phase, with SAP, BVH, and spatial hash broad-phase
 - **Continuous Collision Detection**: Sweep tests and time-of-impact calculations for fast-moving objects
-- **Collision Shapes**: Sphere, box, and capsule primitives
+- **Collision Shapes**: Sphere, box, capsule, convex hull, and triangle mesh colliders
 - **Contact Solver**: Iterative constraint solver with warm starting
 - **Joints**: Distance, ball, and hinge constraints
 - **Island-based Sleeping**: Automatic deactivation of resting body groups
@@ -72,6 +72,28 @@ let cube = CollisionShape::cube(Vec3::new(0.5, 0.5, 0.5));
 
 // Capsule with radius and half-height
 let capsule = CollisionShape::capsule(0.5, 1.0);
+
+// Convex hull from vertices (uses QuickHull algorithm)
+let vertices = vec![
+    Vec3::new(0.0, 1.0, 0.0),
+    Vec3::new(-1.0, -0.5, -0.5),
+    Vec3::new(1.0, -0.5, -0.5),
+    Vec3::new(0.0, -0.5, 1.0),
+];
+let convex = CollisionShape::convex_hull(vertices);
+
+// Triangle mesh from vertices and indices
+let mesh_vertices = vec![
+    Vec3::new(0.0, 0.0, 0.0),
+    Vec3::new(1.0, 0.0, 0.0),
+    Vec3::new(0.5, 1.0, 0.0),
+    Vec3::new(0.5, 0.5, 1.0),
+];
+let indices = vec![0, 1, 2, 0, 2, 3, 0, 3, 1, 1, 3, 2];
+let mesh = CollisionShape::from_vertices_and_indices(&mesh_vertices, &indices);
+
+// Decompose mesh into convex hulls for faster collision
+let convex_parts = mesh.convex_decompose(2); // depth parameter
 ```
 
 ## Materials
@@ -148,7 +170,7 @@ for particle in fluid.particles() {
 - [x] Island-based sleeping
 - [x] Broad-phase acceleration
 - [x] Continuous collision detection (CCD)
-- [ ] Convex hull and mesh colliders
+- [x] Convex hull and mesh colliders
 - [ ] Fluid-rigid body coupling
 - [ ] GPU acceleration
 

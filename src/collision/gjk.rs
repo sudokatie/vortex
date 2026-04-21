@@ -530,4 +530,223 @@ mod tests {
         let closest = closest_point_on_line(Vec3::new(1.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0));
         assert!((closest - Vec3::new(1.0, 0.0, 0.0)).length() < 0.001);
     }
+
+    #[test]
+    fn test_convex_sphere_intersecting() {
+        // Tetrahedron convex hull
+        let vertices = vec![
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-1.0, -0.5, -0.5),
+            Vec3::new(1.0, -0.5, -0.5),
+            Vec3::new(0.0, -0.5, 1.0),
+        ];
+        let convex = CollisionShape::convex_hull(vertices);
+        let sphere = CollisionShape::sphere(0.5);
+
+        let t1 = Transform::from_position(Vec3::ZERO);
+        let t2 = Transform::from_position(Vec3::new(0.5, 0.0, 0.0));
+
+        let result = gjk_intersection(&convex, &t1, &sphere, &t2);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_convex_sphere_not_intersecting() {
+        let vertices = vec![
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-1.0, -0.5, -0.5),
+            Vec3::new(1.0, -0.5, -0.5),
+            Vec3::new(0.0, -0.5, 1.0),
+        ];
+        let convex = CollisionShape::convex_hull(vertices);
+        let sphere = CollisionShape::sphere(0.5);
+
+        let t1 = Transform::from_position(Vec3::ZERO);
+        let t2 = Transform::from_position(Vec3::new(5.0, 0.0, 0.0));
+
+        let result = gjk_intersection(&convex, &t1, &sphere, &t2);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_convex_box_intersecting() {
+        let vertices = vec![
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-1.0, -0.5, -0.5),
+            Vec3::new(1.0, -0.5, -0.5),
+            Vec3::new(0.0, -0.5, 1.0),
+        ];
+        let convex = CollisionShape::convex_hull(vertices);
+        let box_shape = CollisionShape::cube(Vec3::ONE);
+
+        let t1 = Transform::from_position(Vec3::ZERO);
+        let t2 = Transform::from_position(Vec3::new(1.0, 0.0, 0.0));
+
+        let result = gjk_intersection(&convex, &t1, &box_shape, &t2);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_convex_box_not_intersecting() {
+        let vertices = vec![
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-1.0, -0.5, -0.5),
+            Vec3::new(1.0, -0.5, -0.5),
+            Vec3::new(0.0, -0.5, 1.0),
+        ];
+        let convex = CollisionShape::convex_hull(vertices);
+        let box_shape = CollisionShape::cube(Vec3::ONE);
+
+        let t1 = Transform::from_position(Vec3::ZERO);
+        let t2 = Transform::from_position(Vec3::new(5.0, 0.0, 0.0));
+
+        let result = gjk_intersection(&convex, &t1, &box_shape, &t2);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_convex_convex_intersecting() {
+        let vertices = vec![
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-1.0, -0.5, -0.5),
+            Vec3::new(1.0, -0.5, -0.5),
+            Vec3::new(0.0, -0.5, 1.0),
+        ];
+        let convex_a = CollisionShape::convex_hull(vertices.clone());
+        let convex_b = CollisionShape::convex_hull(vertices);
+
+        let t1 = Transform::from_position(Vec3::ZERO);
+        let t2 = Transform::from_position(Vec3::new(0.5, 0.0, 0.0));
+
+        let result = gjk_intersection(&convex_a, &t1, &convex_b, &t2);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_convex_distance() {
+        let vertices = vec![
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-1.0, -0.5, -0.5),
+            Vec3::new(1.0, -0.5, -0.5),
+            Vec3::new(0.0, -0.5, 1.0),
+        ];
+        let convex = CollisionShape::convex_hull(vertices);
+        let sphere = CollisionShape::sphere(0.5);
+
+        let t1 = Transform::from_position(Vec3::ZERO);
+        let t2 = Transform::from_position(Vec3::new(5.0, 0.0, 0.0));
+
+        let dist = gjk_distance(&convex, &t1, &sphere, &t2);
+        // Distance should be approximately 5 - 1 (convex extent) - 0.5 (sphere radius)
+        assert!(dist > 2.0);
+    }
+
+    // Mesh collider tests
+
+    #[test]
+    fn test_mesh_sphere_intersecting() {
+        use crate::collision::Triangle;
+
+        // Simple triangle mesh
+        let triangles = vec![
+            Triangle::new(
+                Vec3::new(-1.0, -1.0, 0.0),
+                Vec3::new(1.0, -1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ),
+        ];
+        let mesh = CollisionShape::mesh(triangles);
+        let sphere = CollisionShape::sphere(0.5);
+
+        let t1 = Transform::from_position(Vec3::ZERO);
+        let t2 = Transform::from_position(Vec3::new(0.0, 0.0, 0.3)); // Close to mesh
+
+        let result = gjk_intersection(&mesh, &t1, &sphere, &t2);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_mesh_sphere_not_intersecting() {
+        use crate::collision::Triangle;
+
+        let triangles = vec![
+            Triangle::new(
+                Vec3::new(-1.0, -1.0, 0.0),
+                Vec3::new(1.0, -1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ),
+        ];
+        let mesh = CollisionShape::mesh(triangles);
+        let sphere = CollisionShape::sphere(0.5);
+
+        let t1 = Transform::from_position(Vec3::ZERO);
+        let t2 = Transform::from_position(Vec3::new(5.0, 0.0, 0.0));
+
+        let result = gjk_intersection(&mesh, &t1, &sphere, &t2);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_mesh_box_intersecting() {
+        use crate::collision::Triangle;
+
+        let triangles = vec![
+            Triangle::new(
+                Vec3::new(-1.0, -1.0, 0.0),
+                Vec3::new(1.0, -1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ),
+        ];
+        let mesh = CollisionShape::mesh(triangles);
+        let box_shape = CollisionShape::cube(Vec3::ONE);
+
+        let t1 = Transform::from_position(Vec3::ZERO);
+        let t2 = Transform::from_position(Vec3::new(0.5, 0.0, 0.0));
+
+        let result = gjk_intersection(&mesh, &t1, &box_shape, &t2);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_mesh_capsule_intersecting() {
+        use crate::collision::Triangle;
+
+        let triangles = vec![
+            Triangle::new(
+                Vec3::new(-1.0, -1.0, 0.0),
+                Vec3::new(1.0, -1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ),
+        ];
+        let mesh = CollisionShape::mesh(triangles);
+        let capsule = CollisionShape::capsule(0.5, 1.0);
+
+        let t1 = Transform::from_position(Vec3::ZERO);
+        let t2 = Transform::from_position(Vec3::new(0.0, 0.0, 0.3));
+
+        let result = gjk_intersection(&mesh, &t1, &capsule, &t2);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_mesh_distance() {
+        use crate::collision::Triangle;
+
+        let triangles = vec![
+            Triangle::new(
+                Vec3::new(-1.0, -1.0, 0.0),
+                Vec3::new(1.0, -1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ),
+        ];
+        let mesh = CollisionShape::mesh(triangles);
+        let sphere = CollisionShape::sphere(0.5);
+
+        let t1 = Transform::from_position(Vec3::ZERO);
+        let t2 = Transform::from_position(Vec3::new(5.0, 0.0, 0.0));
+
+        let dist = gjk_distance(&mesh, &t1, &sphere, &t2);
+        // Mesh extends to x=1, sphere has radius 0.5, distance should be ~3.5
+        assert!(dist > 3.0);
+    }
 }
