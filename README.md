@@ -171,7 +171,7 @@ for particle in fluid.particles() {
 - [x] Broad-phase acceleration
 - [x] Continuous collision detection (CCD)
 - [x] Convex hull and mesh colliders
-- [ ] Fluid-rigid body coupling
+- [x] Fluid-rigid body coupling
 - [ ] GPU acceleration
 
 ## License

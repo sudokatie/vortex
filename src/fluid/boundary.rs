@@ -4,11 +4,13 @@
 //!
 //! - `PlaneBoundary`: Infinite plane boundary with penalty forces
 //! - `BoxBoundary`: Axis-aligned box boundary composed of 6 plane boundaries
+//! - `RigidBodyBoundary`: Dynamic boundary from a rigid body's collision shape
 //! - `Boundary`: Trait for implementing custom boundary types
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use super::particle::FluidParticle;
+use crate::collision::CollisionShape;
 
 /// Trait for boundary conditions that apply forces to fluid particles.
 ///
@@ -240,6 +242,231 @@ impl BoxBoundary {
 impl Boundary for BoxBoundary {
     fn apply_force(&self, particle: &FluidParticle) -> Vec3 {
         BoxBoundary::apply_force(self, particle)
+    }
+}
+
+/// Boundary from a rigid body's collision shape.
+///
+/// Treats a rigid body as a dynamic boundary for fluid particles.
+/// The boundary updates each step based on the body's position and rotation.
+/// Supports sphere, box, and capsule collision shapes.
+#[derive(Debug, Clone)]
+pub struct RigidBodyBoundary {
+    /// Collision shape of the rigid body
+    pub shape: CollisionShape,
+    /// Current position of the rigid body
+    pub position: Vec3,
+    /// Current rotation of the rigid body
+    pub rotation: Quat,
+    /// Linear velocity of the rigid body (for relative damping)
+    pub velocity: Vec3,
+    /// Penalty force coefficient (force per unit penetration)
+    pub stiffness: f64,
+    /// Velocity damping coefficient at the boundary
+    pub damping: f64,
+}
+
+impl RigidBodyBoundary {
+    /// Create a new rigid body boundary.
+    ///
+    /// # Arguments
+    /// * `shape` - The collision shape of the rigid body
+    /// * `position` - Initial position
+    /// * `rotation` - Initial rotation
+    pub fn new(shape: CollisionShape, position: Vec3, rotation: Quat) -> Self {
+        Self {
+            shape,
+            position,
+            rotation,
+            velocity: Vec3::ZERO,
+            stiffness: 50000.0,
+            damping: 0.5,
+        }
+    }
+
+    /// Create a rigid body boundary with custom parameters.
+    pub fn with_params(
+        shape: CollisionShape,
+        position: Vec3,
+        rotation: Quat,
+        stiffness: f64,
+        damping: f64,
+    ) -> Self {
+        Self {
+            shape,
+            position,
+            rotation,
+            velocity: Vec3::ZERO,
+            stiffness,
+            damping,
+        }
+    }
+
+    /// Update the boundary's transform and velocity.
+    pub fn update(&mut self, position: Vec3, rotation: Quat, velocity: Vec3) {
+        self.position = position;
+        self.rotation = rotation;
+        self.velocity = velocity;
+    }
+
+    /// Transform a world-space point to local space of the rigid body.
+    #[inline]
+    fn world_to_local(&self, world_point: Vec3) -> Vec3 {
+        let inv_rotation = self.rotation.inverse();
+        inv_rotation * (world_point - self.position)
+    }
+
+    /// Transform a local-space direction to world space.
+    #[inline]
+    fn local_to_world_dir(&self, local_dir: Vec3) -> Vec3 {
+        self.rotation * local_dir
+    }
+
+    /// Compute signed distance and outward normal for a sphere shape.
+    /// Returns (signed_distance, normal) where negative distance means penetration.
+    fn sphere_sdf(&self, particle_pos: Vec3, radius: f32) -> (f64, Vec3) {
+        let to_particle = particle_pos - self.position;
+        let dist_to_center = to_particle.length();
+
+        if dist_to_center < 1e-10 {
+            // Particle at center of sphere - push in arbitrary direction
+            return (-(radius as f64), Vec3::Y);
+        }
+
+        let normal = to_particle / dist_to_center;
+        let signed_distance = (dist_to_center - radius) as f64;
+        (signed_distance, normal)
+    }
+
+    /// Compute signed distance and outward normal for a box shape.
+    /// Returns (signed_distance, normal) where negative distance means penetration.
+    fn box_sdf(&self, particle_pos: Vec3, half_extents: Vec3) -> (f64, Vec3) {
+        // Transform particle to local space
+        let local_pos = self.world_to_local(particle_pos);
+
+        // Compute distance to box surface in local space
+        // For points inside: negative distance to nearest face
+        // For points outside: positive distance to nearest point on surface
+
+        let abs_pos = local_pos.abs();
+        let diff = abs_pos - half_extents;
+
+        // Check if inside the box
+        if diff.x < 0.0 && diff.y < 0.0 && diff.z < 0.0 {
+            // Inside - find closest face
+            let penetrations = [
+                (half_extents.x - abs_pos.x, Vec3::new(local_pos.x.signum(), 0.0, 0.0)),
+                (half_extents.y - abs_pos.y, Vec3::new(0.0, local_pos.y.signum(), 0.0)),
+                (half_extents.z - abs_pos.z, Vec3::new(0.0, 0.0, local_pos.z.signum())),
+            ];
+
+            let (min_pen, local_normal) = penetrations
+                .iter()
+                .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
+                .unwrap();
+
+            let world_normal = self.local_to_world_dir(*local_normal);
+            return (-(*min_pen as f64), world_normal);
+        }
+
+        // Outside - compute distance to nearest point on surface
+        let clamped = local_pos.clamp(-half_extents, half_extents);
+        let to_surface = local_pos - clamped;
+        let dist = to_surface.length();
+
+        if dist < 1e-10 {
+            // On surface - use largest component for normal
+            let abs_diff = diff.abs();
+            let local_normal = if abs_diff.x >= abs_diff.y && abs_diff.x >= abs_diff.z {
+                Vec3::new(local_pos.x.signum(), 0.0, 0.0)
+            } else if abs_diff.y >= abs_diff.z {
+                Vec3::new(0.0, local_pos.y.signum(), 0.0)
+            } else {
+                Vec3::new(0.0, 0.0, local_pos.z.signum())
+            };
+            return (0.0, self.local_to_world_dir(local_normal));
+        }
+
+        let local_normal = to_surface / dist;
+        let world_normal = self.local_to_world_dir(local_normal);
+        (dist as f64, world_normal)
+    }
+
+    /// Compute signed distance and outward normal for a capsule shape.
+    /// Capsule is oriented along Y axis with hemispherical caps.
+    /// Returns (signed_distance, normal) where negative distance means penetration.
+    fn capsule_sdf(&self, particle_pos: Vec3, radius: f32, half_height: f32) -> (f64, Vec3) {
+        // Transform particle to local space
+        let local_pos = self.world_to_local(particle_pos);
+
+        // Capsule segment goes from (0, -half_height, 0) to (0, half_height, 0)
+        // Find closest point on segment
+        let segment_y = local_pos.y.clamp(-half_height, half_height);
+        let closest_on_segment = Vec3::new(0.0, segment_y, 0.0);
+
+        let to_particle = local_pos - closest_on_segment;
+        let dist_to_axis = to_particle.length();
+
+        if dist_to_axis < 1e-10 {
+            // On the axis - push outward in X direction
+            let local_normal = Vec3::X;
+            let world_normal = self.local_to_world_dir(local_normal);
+            return (-(radius as f64), world_normal);
+        }
+
+        let local_normal = to_particle / dist_to_axis;
+        let world_normal = self.local_to_world_dir(local_normal);
+        let signed_distance = (dist_to_axis - radius) as f64;
+        (signed_distance, world_normal)
+    }
+
+    /// Compute penalty force for a particle near/inside this boundary.
+    pub fn apply_force(&self, particle: &FluidParticle) -> Vec3 {
+        let (signed_distance, normal) = match &self.shape {
+            CollisionShape::Sphere { radius } => {
+                self.sphere_sdf(particle.position, *radius)
+            }
+            CollisionShape::Box { half_extents } => {
+                self.box_sdf(particle.position, *half_extents)
+            }
+            CollisionShape::Capsule { radius, half_height } => {
+                self.capsule_sdf(particle.position, *radius, *half_height)
+            }
+            // For convex/mesh shapes, use AABB approximation
+            CollisionShape::Convex { .. } | CollisionShape::Mesh { .. } => {
+                let aabb = self.shape.local_aabb();
+                self.box_sdf(particle.position, (aabb.max - aabb.min) * 0.5)
+            }
+        };
+
+        // No force if particle is outside the boundary
+        if signed_distance >= 0.0 {
+            return Vec3::ZERO;
+        }
+
+        let penetration_depth = -signed_distance;
+
+        // Stiffness force: pushes particle out
+        let stiffness_force = self.stiffness * penetration_depth;
+
+        // Relative velocity (particle velocity relative to body surface)
+        let relative_velocity = particle.velocity - self.velocity;
+
+        // Damping force: resists relative velocity into boundary
+        let velocity_into_boundary = relative_velocity.dot(normal) as f64;
+        let damping_force = if velocity_into_boundary < 0.0 {
+            -self.damping * velocity_into_boundary * penetration_depth
+        } else {
+            0.0
+        };
+
+        normal * (stiffness_force + damping_force) as f32
+    }
+}
+
+impl Boundary for RigidBodyBoundary {
+    fn apply_force(&self, particle: &FluidParticle) -> Vec3 {
+        RigidBodyBoundary::apply_force(self, particle)
     }
 }
 
@@ -589,5 +816,195 @@ mod tests {
             "Force should be along normal, dot = {}",
             dot
         );
+    }
+
+    // ==================== RigidBodyBoundary Tests ====================
+
+    #[test]
+    fn rigid_body_boundary_sphere_no_force_outside() {
+        let boundary = RigidBodyBoundary::new(
+            CollisionShape::Sphere { radius: 1.0 },
+            Vec3::ZERO,
+            Quat::IDENTITY,
+        );
+        let particle = FluidParticle::new(Vec3::new(2.0, 0.0, 0.0), 1.0);
+
+        let force = boundary.apply_force(&particle);
+        assert!(force.length() < EPSILON, "Should be no force outside sphere");
+    }
+
+    #[test]
+    fn rigid_body_boundary_sphere_force_inside() {
+        let boundary = RigidBodyBoundary::new(
+            CollisionShape::Sphere { radius: 1.0 },
+            Vec3::ZERO,
+            Quat::IDENTITY,
+        );
+        let particle = FluidParticle::new(Vec3::new(0.5, 0.0, 0.0), 1.0);
+
+        let force = boundary.apply_force(&particle);
+        assert!(force.x > 0.0, "Force should push particle outward (+X)");
+    }
+
+    #[test]
+    fn rigid_body_boundary_sphere_force_proportional_to_penetration() {
+        let boundary = RigidBodyBoundary::with_params(
+            CollisionShape::Sphere { radius: 1.0 },
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            1000.0,
+            0.0,
+        );
+
+        let p1 = FluidParticle::new(Vec3::new(0.9, 0.0, 0.0), 1.0); // 0.1 penetration
+        let p2 = FluidParticle::new(Vec3::new(0.8, 0.0, 0.0), 1.0); // 0.2 penetration
+
+        let f1 = boundary.apply_force(&p1);
+        let f2 = boundary.apply_force(&p2);
+
+        // Double penetration should give roughly double force
+        assert!((f2.length() / f1.length() - 2.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn rigid_body_boundary_box_no_force_outside() {
+        let boundary = RigidBodyBoundary::new(
+            CollisionShape::Box { half_extents: Vec3::ONE },
+            Vec3::ZERO,
+            Quat::IDENTITY,
+        );
+        let particle = FluidParticle::new(Vec3::new(2.0, 0.0, 0.0), 1.0);
+
+        let force = boundary.apply_force(&particle);
+        assert!(force.length() < EPSILON, "Should be no force outside box");
+    }
+
+    #[test]
+    fn rigid_body_boundary_box_force_inside() {
+        let boundary = RigidBodyBoundary::new(
+            CollisionShape::Box { half_extents: Vec3::ONE },
+            Vec3::ZERO,
+            Quat::IDENTITY,
+        );
+        let particle = FluidParticle::new(Vec3::new(0.5, 0.0, 0.0), 1.0);
+
+        let force = boundary.apply_force(&particle);
+        // Should push outward toward nearest face (+X)
+        assert!(force.x > 0.0, "Force should push particle outward");
+    }
+
+    #[test]
+    fn rigid_body_boundary_box_rotated() {
+        // Rotate box 45 degrees around Y axis
+        let rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_4);
+        let boundary = RigidBodyBoundary::new(
+            CollisionShape::Box { half_extents: Vec3::new(1.0, 1.0, 1.0) },
+            Vec3::ZERO,
+            rotation,
+        );
+
+        // Particle inside the rotated box
+        let particle = FluidParticle::new(Vec3::new(0.5, 0.0, 0.5), 1.0);
+        let force = boundary.apply_force(&particle);
+
+        // Should have non-zero force pushing outward
+        assert!(force.length() > 0.0, "Should push particle out of rotated box");
+    }
+
+    #[test]
+    fn rigid_body_boundary_capsule_no_force_outside() {
+        let boundary = RigidBodyBoundary::new(
+            CollisionShape::Capsule { radius: 0.5, half_height: 1.0 },
+            Vec3::ZERO,
+            Quat::IDENTITY,
+        );
+        let particle = FluidParticle::new(Vec3::new(2.0, 0.0, 0.0), 1.0);
+
+        let force = boundary.apply_force(&particle);
+        assert!(force.length() < EPSILON, "Should be no force outside capsule");
+    }
+
+    #[test]
+    fn rigid_body_boundary_capsule_force_inside() {
+        let boundary = RigidBodyBoundary::new(
+            CollisionShape::Capsule { radius: 1.0, half_height: 1.0 },
+            Vec3::ZERO,
+            Quat::IDENTITY,
+        );
+        // Particle inside the cylindrical part
+        let particle = FluidParticle::new(Vec3::new(0.5, 0.0, 0.0), 1.0);
+
+        let force = boundary.apply_force(&particle);
+        assert!(force.x > 0.0, "Force should push particle outward (+X)");
+    }
+
+    #[test]
+    fn rigid_body_boundary_capsule_hemispherical_cap() {
+        let boundary = RigidBodyBoundary::new(
+            CollisionShape::Capsule { radius: 1.0, half_height: 1.0 },
+            Vec3::ZERO,
+            Quat::IDENTITY,
+        );
+        // Particle inside the top hemispherical cap
+        let particle = FluidParticle::new(Vec3::new(0.0, 1.5, 0.0), 1.0);
+
+        let force = boundary.apply_force(&particle);
+        assert!(force.y > 0.0, "Force should push particle upward out of cap");
+    }
+
+    #[test]
+    fn rigid_body_boundary_update_position() {
+        let mut boundary = RigidBodyBoundary::new(
+            CollisionShape::Sphere { radius: 1.0 },
+            Vec3::ZERO,
+            Quat::IDENTITY,
+        );
+
+        // Particle outside sphere at origin
+        let particle = FluidParticle::new(Vec3::new(1.5, 0.0, 0.0), 1.0);
+        let force1 = boundary.apply_force(&particle);
+        assert!(force1.length() < EPSILON, "No force initially");
+
+        // Move sphere so particle is now inside
+        boundary.update(Vec3::new(1.5, 0.0, 0.0), Quat::IDENTITY, Vec3::ZERO);
+        let force2 = boundary.apply_force(&particle);
+        assert!(force2.length() > 0.0, "Force after sphere moved to particle");
+    }
+
+    #[test]
+    fn rigid_body_boundary_damping_with_body_velocity() {
+        let mut boundary = RigidBodyBoundary::with_params(
+            CollisionShape::Sphere { radius: 1.0 },
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            1000.0,
+            10.0,
+        );
+
+        // Particle inside, stationary
+        let mut particle = FluidParticle::new(Vec3::new(0.5, 0.0, 0.0), 1.0);
+        particle.velocity = Vec3::ZERO;
+
+        // Body moving toward particle - relative velocity is into boundary
+        boundary.velocity = Vec3::new(1.0, 0.0, 0.0);
+        let force = boundary.apply_force(&particle);
+
+        // Damping should add to the force since particle is "moving into" body
+        assert!(force.x > 0.0, "Damping should contribute to pushing particle out");
+    }
+
+    #[test]
+    fn rigid_body_boundary_trait_implementation() {
+        let boundary = RigidBodyBoundary::new(
+            CollisionShape::Sphere { radius: 1.0 },
+            Vec3::ZERO,
+            Quat::IDENTITY,
+        );
+        let particle = FluidParticle::new(Vec3::new(0.5, 0.0, 0.0), 1.0);
+
+        // Test through trait
+        let boundary_ref: &dyn Boundary = &boundary;
+        let force = boundary_ref.apply_force(&particle);
+        assert!(force.x > 0.0);
     }
 }

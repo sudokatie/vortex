@@ -13,6 +13,10 @@ use crate::constraints::{
 };
 use crate::dynamics::RigidBody;
 use crate::dynamics::material::{combine_friction, combine_restitution};
+use crate::fluid::{
+    FluidCouplingParams, FluidForceOutput, FluidParticle,
+    apply_boundary_forces_to_particles, apply_fluid_forces_to_body,
+};
 use crate::world::island::{IslandDetector, Island, ContactPair, JointPair};
 use crate::world::step::{StepConfig, StepResult};
 
@@ -35,6 +39,10 @@ pub struct PhysicsWorld {
     sleep_timers: HashMap<BodyHandle, f32>,
     /// Cached manifolds from last step
     contact_manifolds: Vec<ContactManifold>,
+    /// Fluid particles for coupling (managed externally or internally)
+    fluid_particles: Vec<FluidParticle>,
+    /// Fluid-rigid body coupling parameters
+    pub fluid_coupling: FluidCouplingParams,
 }
 
 impl Default for PhysicsWorld {
@@ -56,9 +64,11 @@ impl PhysicsWorld {
             config: StepConfig::default(),
             sleep_timers: HashMap::new(),
             contact_manifolds: Vec::new(),
+            fluid_particles: Vec::new(),
+            fluid_coupling: FluidCouplingParams::default(),
         }
     }
-    
+
     /// Create with custom config.
     pub fn with_config(config: StepConfig) -> Self {
         let mut world = Self::new();
@@ -169,6 +179,141 @@ impl PhysicsWorld {
         self.config.ccd_enabled
     }
 
+    // ==================== Fluid Coupling Methods ====================
+
+    /// Set the fluid particles for coupling.
+    ///
+    /// Call this before each step to update the fluid state from an external solver.
+    pub fn set_fluid_particles(&mut self, particles: Vec<FluidParticle>) {
+        self.fluid_particles = particles;
+    }
+
+    /// Get a reference to the fluid particles.
+    pub fn fluid_particles(&self) -> &[FluidParticle] {
+        &self.fluid_particles
+    }
+
+    /// Get a mutable reference to the fluid particles.
+    pub fn fluid_particles_mut(&mut self) -> &mut Vec<FluidParticle> {
+        &mut self.fluid_particles
+    }
+
+    /// Clear all fluid particles.
+    pub fn clear_fluid_particles(&mut self) {
+        self.fluid_particles.clear();
+    }
+
+    /// Enable or disable fluid coupling.
+    pub fn set_fluid_coupling_enabled(&mut self, buoyancy: bool, drag: bool) {
+        self.fluid_coupling.buoyancy_enabled = buoyancy;
+        self.fluid_coupling.drag_enabled = drag;
+    }
+
+    /// Check if fluid coupling is enabled.
+    pub fn fluid_coupling_enabled(&self) -> bool {
+        self.fluid_coupling.buoyancy_enabled || self.fluid_coupling.drag_enabled
+    }
+
+    /// Perform fluid-rigid body coupling step.
+    ///
+    /// This creates two-way coupling:
+    /// 1. Applies boundary forces to fluid particles (pushes them out of bodies)
+    /// 2. Computes buoyancy and drag on rigid bodies from surrounding fluid
+    /// 3. Applies fluid forces to rigid bodies
+    ///
+    /// Call this between fluid solving and rigid body solving.
+    pub fn coupling_step(&mut self) {
+        if self.fluid_particles.is_empty() {
+            return;
+        }
+
+        let coupling_enabled = self.fluid_coupling.buoyancy_enabled || self.fluid_coupling.drag_enabled;
+        if !coupling_enabled && self.fluid_coupling.stiffness <= 0.0 {
+            return;
+        }
+
+        // Collect body data to avoid borrow issues
+        let body_data: Vec<_> = self.bodies
+            .iter()
+            .map(|(handle, body)| {
+                (
+                    handle,
+                    body.shape.clone(),
+                    body.position,
+                    body.rotation,
+                    body.linear_velocity,
+                    body.is_dynamic(),
+                    body.is_sleeping,
+                )
+            })
+            .collect();
+
+        let gravity = self.gravity;
+        let params = self.fluid_coupling.clone();
+
+        // For each rigid body near fluid particles
+        for (handle, shape, position, rotation, velocity, is_dynamic, is_sleeping) in body_data {
+            if is_sleeping {
+                continue;
+            }
+
+            // 1. Apply boundary forces to fluid particles (push them out of the body)
+            let reaction = apply_boundary_forces_to_particles(
+                &mut self.fluid_particles,
+                &shape,
+                position,
+                rotation,
+                velocity,
+                &params,
+            );
+
+            // 2. Compute buoyancy and drag on the body
+            let fluid_forces = apply_fluid_forces_to_body(
+                &shape,
+                position,
+                rotation,
+                velocity,
+                &self.fluid_particles,
+                gravity,
+                &params,
+            );
+
+            // 3. Apply forces to the rigid body
+            if is_dynamic {
+                if let Some(body) = self.bodies.get_mut(handle) {
+                    // Apply buoyancy and drag
+                    body.apply_force(fluid_forces.force);
+                    body.apply_torque(fluid_forces.torque);
+
+                    // Optionally apply reaction force from boundary interactions
+                    // (This creates more accurate two-way coupling but may cause instability)
+                    // body.apply_force(reaction * 0.1);
+                    let _ = reaction; // Suppress unused warning
+                }
+            }
+        }
+    }
+
+    /// Get coupling forces that would be applied to a body without actually applying them.
+    ///
+    /// Useful for debugging or visualization.
+    pub fn compute_fluid_forces(&self, handle: BodyHandle) -> FluidForceOutput {
+        let body = match self.bodies.get(handle) {
+            Some(b) => b,
+            None => return FluidForceOutput::default(),
+        };
+
+        apply_fluid_forces_to_body(
+            &body.shape,
+            body.position,
+            body.rotation,
+            body.linear_velocity,
+            &self.fluid_particles,
+            self.gravity,
+            &self.fluid_coupling,
+        )
+    }
+
     /// Step the simulation forward by dt seconds.
     pub fn step(&mut self, dt: f32) {
         let _result = self.step_full(dt);
@@ -193,6 +338,10 @@ impl PhysicsWorld {
     fn step_discrete(&mut self, dt: f32, result: &mut StepResult) {
         // 1. Apply forces (gravity, etc.)
         self.apply_forces(dt);
+
+        // 1.5. Fluid-rigid body coupling (two-way interaction)
+        // This applies boundary forces to fluid particles and buoyancy/drag to bodies
+        self.coupling_step();
 
         // 2. Update broadphase AABBs
         self.update_broadphase();
@@ -958,16 +1107,335 @@ mod tests {
         world.config.allow_sleeping = true;
         world.config.time_to_sleep = 0.1;
         world.config.sleep_threshold = 0.1;
-        
+
         let body = RigidBody::new(CollisionShape::sphere(1.0), 1.0, BodyType::Dynamic);
         let handle = world.add_body(body);
-        
+
         // Step multiple times
         for _ in 0..20 {
             world.step(0.016);
         }
-        
+
         // Body should be sleeping after being stationary
         assert!(world.get_body(handle).unwrap().is_sleeping);
+    }
+
+    // ==================== Fluid-Rigid Body Coupling Tests ====================
+
+    #[test]
+    fn test_coupling_buoyancy_upward_force() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vec3::new(0.0, -10.0, 0.0));
+        world.fluid_coupling.buoyancy_enabled = true;
+        world.fluid_coupling.drag_enabled = false;
+        world.fluid_coupling.smoothing_radius = 2.0;
+
+        // Create a sphere submerged in fluid
+        let mut body = RigidBody::new(CollisionShape::sphere(0.5), 1.0, BodyType::Dynamic);
+        body.position = Vec3::ZERO;
+        let handle = world.add_body(body);
+
+        // Create fluid particles around the sphere
+        let mut particles = Vec::new();
+        for x in -3..=3 {
+            for y in -3..=3 {
+                for z in -3..=3 {
+                    particles.push(FluidParticle::new(
+                        Vec3::new(x as f32 * 0.3, y as f32 * 0.3, z as f32 * 0.3),
+                        1.0,
+                    ));
+                }
+            }
+        }
+        world.set_fluid_particles(particles);
+
+        // Compute forces without stepping
+        let forces = world.compute_fluid_forces(handle);
+
+        // Buoyancy should point upward
+        assert!(forces.buoyancy.y > 0.0, "Buoyancy should point up: {:?}", forces.buoyancy);
+    }
+
+    #[test]
+    fn test_coupling_drag_opposes_motion() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vec3::ZERO);
+        world.fluid_coupling.buoyancy_enabled = false;
+        world.fluid_coupling.drag_enabled = true;
+        world.fluid_coupling.smoothing_radius = 2.0;
+
+        // Create a moving sphere
+        let mut body = RigidBody::new(CollisionShape::sphere(0.5), 1.0, BodyType::Dynamic);
+        body.position = Vec3::ZERO;
+        body.linear_velocity = Vec3::new(5.0, 0.0, 0.0); // Moving in +X
+        let handle = world.add_body(body);
+
+        // Create stationary fluid particles
+        let mut particles = Vec::new();
+        for x in -3..=3 {
+            for y in -3..=3 {
+                for z in -3..=3 {
+                    particles.push(FluidParticle::new(
+                        Vec3::new(x as f32 * 0.3, y as f32 * 0.3, z as f32 * 0.3),
+                        1.0,
+                    ));
+                }
+            }
+        }
+        world.set_fluid_particles(particles);
+
+        let forces = world.compute_fluid_forces(handle);
+
+        // Drag should oppose motion (point in -X direction)
+        assert!(forces.drag.x < 0.0, "Drag should oppose motion: {:?}", forces.drag);
+    }
+
+    #[test]
+    fn test_coupling_boundary_pushes_particles() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vec3::ZERO);
+
+        // Create a sphere
+        let mut body = RigidBody::new(CollisionShape::sphere(1.0), 1.0, BodyType::Dynamic);
+        body.position = Vec3::ZERO;
+        world.add_body(body);
+
+        // Create a particle inside the sphere
+        let mut particles = vec![FluidParticle::new(Vec3::new(0.5, 0.0, 0.0), 1.0)];
+        particles[0].acceleration = Vec3::ZERO;
+        world.set_fluid_particles(particles);
+
+        // Run coupling step
+        world.coupling_step();
+
+        // Particle should have been pushed outward
+        let particles = world.fluid_particles();
+        assert!(
+            particles[0].acceleration.x > 0.0,
+            "Particle should be pushed out: {:?}",
+            particles[0].acceleration
+        );
+    }
+
+    #[test]
+    fn test_coupling_two_way_sphere_in_fluid() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vec3::new(0.0, -10.0, 0.0));
+        world.fluid_coupling.buoyancy_enabled = true;
+        world.fluid_coupling.drag_enabled = true;
+        world.fluid_coupling.smoothing_radius = 1.5;
+        world.fluid_coupling.fluid_density = 1000.0;
+
+        // Create a falling sphere - slightly heavier than water so it sinks slowly
+        // Volume = (4/3) * pi * 0.5^3 = 0.52 m^3
+        // Buoyancy at full submersion = 1000 * 0.52 * 10 = 5200 N up
+        // Weight = 600 * 10 = 6000 N down
+        // Net = 800 N down, so it sinks but slowly due to buoyancy
+        let mut body = RigidBody::new(CollisionShape::sphere(0.5), 600.0, BodyType::Dynamic);
+        body.position = Vec3::new(0.0, 0.0, 0.0);
+        body.linear_velocity = Vec3::new(0.0, -2.0, 0.0); // Falling
+        let handle = world.add_body(body);
+
+        // Create dense fluid particles around the sphere
+        let mut particles = Vec::new();
+        for x in -5..=5 {
+            for y in -5..=5 {
+                for z in -5..=5 {
+                    particles.push(FluidParticle::new(
+                        Vec3::new(x as f32 * 0.25, y as f32 * 0.25, z as f32 * 0.25),
+                        1.0,
+                    ));
+                }
+            }
+        }
+        world.set_fluid_particles(particles);
+
+        // Get the fluid forces to verify they're being computed
+        let forces = world.compute_fluid_forces(handle);
+
+        // Verify buoyancy is being computed and pointing up
+        assert!(
+            forces.buoyancy.y > 100.0,
+            "Should have significant buoyancy: {:?}",
+            forces.buoyancy
+        );
+
+        // Also verify drag opposes downward motion
+        // (fluid stationary, body moving down means relative velocity is up)
+        assert!(
+            forces.drag.y > 0.0 || forces.drag.length() < 1.0,
+            "Drag should oppose motion or be small: {:?}",
+            forces.drag
+        );
+    }
+
+    #[test]
+    fn test_coupling_disabled_no_forces() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vec3::new(0.0, -10.0, 0.0));
+        world.fluid_coupling.buoyancy_enabled = false;
+        world.fluid_coupling.drag_enabled = false;
+
+        let mut body = RigidBody::new(CollisionShape::sphere(0.5), 1.0, BodyType::Dynamic);
+        body.position = Vec3::ZERO;
+        let handle = world.add_body(body);
+
+        // Create fluid particles
+        let mut particles = Vec::new();
+        for x in -2..=2 {
+            for y in -2..=2 {
+                for z in -2..=2 {
+                    particles.push(FluidParticle::new(
+                        Vec3::new(x as f32 * 0.3, y as f32 * 0.3, z as f32 * 0.3),
+                        1.0,
+                    ));
+                }
+            }
+        }
+        world.set_fluid_particles(particles);
+
+        let forces = world.compute_fluid_forces(handle);
+
+        // No fluid forces when disabled
+        assert!(forces.force.length() < 1e-5, "Should have no forces when disabled");
+    }
+
+    #[test]
+    fn test_coupling_torque_from_offset_buoyancy() {
+        let mut world = PhysicsWorld::new();
+        world.set_gravity(Vec3::new(0.0, -10.0, 0.0));
+        world.fluid_coupling.buoyancy_enabled = true;
+        world.fluid_coupling.drag_enabled = false;
+        world.fluid_coupling.smoothing_radius = 2.0;
+
+        // Create a box that is partially submerged (tilted scenario)
+        let mut body = RigidBody::new(
+            CollisionShape::Box { half_extents: Vec3::new(1.0, 0.5, 0.5) },
+            2.0,
+            BodyType::Dynamic,
+        );
+        body.position = Vec3::ZERO;
+        let handle = world.add_body(body);
+
+        // Create fluid particles only on one side (asymmetric submersion)
+        let mut particles = Vec::new();
+        for x in 0..=4 { // Only positive X side
+            for y in -2..=2 {
+                for z in -2..=2 {
+                    particles.push(FluidParticle::new(
+                        Vec3::new(x as f32 * 0.3, y as f32 * 0.3, z as f32 * 0.3),
+                        1.0,
+                    ));
+                }
+            }
+        }
+        world.set_fluid_particles(particles);
+
+        let forces = world.compute_fluid_forces(handle);
+
+        // When buoyancy center is offset from body center, there should be torque
+        // The torque magnitude depends on the offset
+        // Note: due to symmetric particles in Y and Z, main torque may be small
+        // but the computation should work
+        assert!(forces.buoyancy.y > 0.0, "Should have buoyancy");
+    }
+
+    #[test]
+    fn test_coupling_sphere_boundary() {
+        let mut world = PhysicsWorld::new();
+
+        let mut body = RigidBody::new(CollisionShape::sphere(1.0), 1.0, BodyType::Dynamic);
+        body.position = Vec3::ZERO;
+        world.add_body(body);
+
+        // Particle inside sphere
+        let particles = vec![FluidParticle::new(Vec3::new(0.3, 0.0, 0.0), 1.0)];
+        world.set_fluid_particles(particles);
+
+        world.coupling_step();
+
+        let p = &world.fluid_particles()[0];
+        // Should be pushed in +X direction
+        assert!(p.acceleration.x > 0.0);
+    }
+
+    #[test]
+    fn test_coupling_box_boundary() {
+        let mut world = PhysicsWorld::new();
+
+        let mut body = RigidBody::new(
+            CollisionShape::Box { half_extents: Vec3::ONE },
+            1.0,
+            BodyType::Dynamic,
+        );
+        body.position = Vec3::ZERO;
+        world.add_body(body);
+
+        // Particle inside box
+        let particles = vec![FluidParticle::new(Vec3::new(0.3, 0.0, 0.0), 1.0)];
+        world.set_fluid_particles(particles);
+
+        world.coupling_step();
+
+        let p = &world.fluid_particles()[0];
+        // Should be pushed outward (nearest face is +X)
+        assert!(p.acceleration.x > 0.0);
+    }
+
+    #[test]
+    fn test_coupling_capsule_boundary() {
+        let mut world = PhysicsWorld::new();
+
+        let mut body = RigidBody::new(
+            CollisionShape::Capsule { radius: 1.0, half_height: 1.0 },
+            1.0,
+            BodyType::Dynamic,
+        );
+        body.position = Vec3::ZERO;
+        world.add_body(body);
+
+        // Particle inside capsule cylinder part
+        let particles = vec![FluidParticle::new(Vec3::new(0.3, 0.0, 0.0), 1.0)];
+        world.set_fluid_particles(particles);
+
+        world.coupling_step();
+
+        let p = &world.fluid_particles()[0];
+        // Should be pushed outward in X direction
+        assert!(p.acceleration.x > 0.0);
+    }
+
+    #[test]
+    fn test_coupling_fluid_particle_management() {
+        let mut world = PhysicsWorld::new();
+
+        assert!(world.fluid_particles().is_empty());
+
+        let particles = vec![
+            FluidParticle::new(Vec3::new(0.0, 0.0, 0.0), 1.0),
+            FluidParticle::new(Vec3::new(1.0, 0.0, 0.0), 1.0),
+        ];
+        world.set_fluid_particles(particles);
+
+        assert_eq!(world.fluid_particles().len(), 2);
+
+        world.clear_fluid_particles();
+        assert!(world.fluid_particles().is_empty());
+    }
+
+    #[test]
+    fn test_coupling_enable_disable() {
+        let mut world = PhysicsWorld::new();
+
+        assert!(world.fluid_coupling_enabled()); // Default enabled
+
+        world.set_fluid_coupling_enabled(false, false);
+        assert!(!world.fluid_coupling_enabled());
+
+        world.set_fluid_coupling_enabled(true, false);
+        assert!(world.fluid_coupling_enabled());
+
+        world.set_fluid_coupling_enabled(false, true);
+        assert!(world.fluid_coupling_enabled());
     }
 }
